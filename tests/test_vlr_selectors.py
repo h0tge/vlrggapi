@@ -127,8 +127,11 @@ SELECTOR_SETS: ClassVar[list[SelectorSet]] = [
             ".match-header-link-name.mod-1",
             ".match-header-link-name.mod-2",
             ".match-header-vs",
-            ".match-streams-btn",
-            ".match-vods",
+            # VLR renamed this block to its sm-* convention. Assert the streams
+            # *container*, not a live item: the canary match is usually over, so
+            # a live .js-stream-embed-btn would fail every run for a good page.
+            ".sm-pane-streams",
+            ".sm-vod",
         ],
         optional=[
             ".match-header-event img",
