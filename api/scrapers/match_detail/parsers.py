@@ -152,45 +152,62 @@ def _parse_teams(html: HTMLParser) -> list[dict]:
     return teams
 
 
-def _item_link(item) -> str:
-    """The clickable link of a stream/VOD item.
+def _external_link(entry) -> str:
+    """Return the outbound URL of a watch-module entry.
 
-    VLR's embed buttons carry the video id in ``data-site-id`` and have no
-    ``href`` of their own — the link is a sibling ``a.sm-ext``.
+    vlr.gg renders each stream/VOD as a ``.sm-btn`` / ``.sm-vod`` block whose
+    clickable body is a plain ``<div class="sm-body js-stream-embed-btn">``
+    (it opens an inline player via JS) plus a sibling
+    ``<a class="sm-ext">`` holding the real outbound URL.
     """
-    anchor = item.css_first("a.sm-ext") or item.css_first("a[href]")
-    return anchor.attributes.get("href", "") if anchor else ""
+    anchor = entry.css_first("a.sm-ext") or entry.css_first("a[href]")
+    if anchor:
+        return anchor.attributes.get("href", "") or ""
+    return ""
 
 
 def _parse_streams_vods(html: HTMLParser) -> tuple[list[dict], list[dict]]:
     """Extract stream buttons and VOD links from the match page.
 
-    VLR moved this block to its ``sm-*`` class convention — the same rename
-    that took the per-map stats tables to ``vm-*``. The old ``.match-vods`` /
-    ``.match-streams-btn`` hooks no longer exist on the page, which silently
-    emptied both lists (caught by the selector-check canary).
+    Current markup uses the ``sm-*`` watch module: streams are ``.sm-btn``
+    entries inside ``.sm-pane-streams`` and VODs are ``.sm-vod`` entries
+    inside ``.sm-pane-vods``. The pre-redesign ``.match-streams-btn`` /
+    ``.match-vods`` markup is still parsed as a fallback.
     """
     streams: list[dict] = []
     vods: list[dict] = []
 
-    # VODs: one .sm-vod per map, name in .sm-vod-name, link on the sibling a.sm-ext.
-    for item in html.css(".sm-vod"):
-        href = _item_link(item)
-        if not href:
-            continue
-        name_el = item.css_first(".sm-vod-name")
-        vods.append({"name": extract_text_content(name_el) if name_el else "", "url": href})
+    for btn in html.css(".sm-btn"):
+        name_elem = btn.css_first(".sm-name")
+        name = extract_text_content(name_elem) if name_elem else extract_text_content(btn)
+        href = _external_link(btn)
+        if name or href:
+            streams.append({"name": name, "url": build_full_url(href)})
 
-    # Streams: same embed-button family. ponytail: the item class for a live
-    # broadcast could not be verified — no match was streaming when this was
-    # written, so match on data-embed-kind and read the link from the nearest
-    # container. Re-check against a live match and tighten if this misses.
-    for btn in html.css('.js-stream-embed-btn[data-embed-kind="stream"]'):
-        container = btn.parent
-        href = _item_link(container) if container is not None else ""
+    for vod in html.css(".sm-vod"):
+        name_elem = vod.css_first(".sm-vod-name")
+        name = extract_text_content(name_elem) if name_elem else extract_text_content(vod)
+        href = _external_link(vod)
+        if name or href:
+            vods.append({"name": name, "url": href})
+
+    if streams or vods:
+        return streams, vods
+
+    # Legacy markup fallback (.match-streams-btn / .match-vods).
+    for btn in html.css(".match-streams-btn"):
+        href = btn.attributes.get("href", "")
         name = extract_text_content(btn)
         if name or href:
             streams.append({"name": name, "url": build_full_url(href)})
+
+    vods_container = html.css_first(".match-vods")
+    if vods_container:
+        for anchor in vods_container.css("a"):
+            href = anchor.attributes.get("href", "")
+            name = extract_text_content(anchor)
+            if name or href:
+                vods.append({"name": name, "url": href})
 
     return streams, vods
 
