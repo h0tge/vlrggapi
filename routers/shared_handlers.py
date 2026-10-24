@@ -10,6 +10,7 @@ from api.scrapers import (
     vlr_events,
     vlr_live_score,
     vlr_match_detail,
+    vlr_match_logs,
     vlr_match_results,
     vlr_news,
     vlr_player,
@@ -110,6 +111,10 @@ async def get_events_data(q: str | None, page: int) -> dict:
 
 async def get_match_detail_data(match_id: str, light: bool = False) -> dict:
     return await vlr_match_detail(match_id, light=light)
+
+
+async def get_match_logs_data(match_id: str, game_id: str | None = None) -> dict:
+    return await vlr_match_logs(match_id, game_id)
 
 
 async def get_player_data(player_id: str, timespan: str) -> dict:
