@@ -36,6 +36,9 @@ TIERS: dict[str, tuple[int, int]] = {
     "expensive": (20, 60),
 }
 
+# Every N admitted requests, forget keys whose window has already expired.
+_PRUNE_EVERY = 1024
+
 # URL-pattern → tier mapping. Order matters: more specific paths first.
 _MODERATE_MATCH_Q = frozenset({"upcoming", "live_score"})
 
@@ -106,9 +109,22 @@ class SlidingWindowRateLimiter:
         self._stores: dict[str, dict[str, deque[float]]] = defaultdict(
             lambda: defaultdict(deque)
         )
+        self._checks = 0
 
     @staticmethod
     def _client_ip(request: Request) -> str:
+        """Client IP as stamped by the edge, never a client-supplied hop.
+
+        Cloudflare overwrites ``CF-Connecting-IP`` but appends to
+        ``X-Forwarded-For``, so the first XFF entry is whatever the caller sent
+        and keying on it let anyone reset their own limit.
+        shortcut: the XFF fallback is the old spoofable behaviour, kept so a
+        deployment without a trusted edge does not collapse into one shared
+        bucket; drop it once every deployment stamps the header.
+        """
+        cf_ip = request.headers.get("CF-Connecting-IP")
+        if cf_ip:
+            return cf_ip.strip()
         forwarded = request.headers.get("X-Forwarded-For")
         if forwarded:
             return forwarded.split(",")[0].strip()
@@ -137,8 +153,18 @@ class SlidingWindowRateLimiter:
             return False, 0, retry_after
 
         store.append(now)
+        self._checks += 1
+        if self._checks % _PRUNE_EVERY == 0:
+            self._prune(now)
         remaining = limit - len(store)
         return True, remaining, 0
+
+    def _prune(self, now: float) -> None:
+        """Drop keys whose window is already empty; they were never evicted."""
+        for tier, stores in self._stores.items():
+            cutoff = now - TIERS[tier][1]
+            for key in [k for k, seen in stores.items() if not seen or seen[-1] < cutoff]:
+                del stores[key]
 
 
 # ---------------------------------------------------------------------------
