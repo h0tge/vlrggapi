@@ -214,7 +214,11 @@ async def v2_event_detail(
 
 @router.get("/search", response_model=V2Response, summary="Search", description="Search VLR.GG for teams, players, events, and series. Returns categorized results.")
 async def v2_search(
-    q: str = Query(..., description="Search query (player name, team name, event keyword)"),
+    q: str = Query(
+        ...,
+        max_length=100,
+        description="Search query (player name, team name, event keyword)",
+    ),
 ):
     result = await get_search_data(q)
     return _wrap_v2(result)

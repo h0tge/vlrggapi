@@ -2,7 +2,7 @@ import logging
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 
 from api.utils.rate_limiter import RateLimitMiddleware
 from routers.v2_router import router as v2_router
@@ -31,6 +31,13 @@ app = FastAPI(
 )
 
 app.add_middleware(RateLimitMiddleware)
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
 
 app.include_router(vlr_router)
 app.include_router(v2_router)
