@@ -147,9 +147,24 @@ def _vods_are_published(tree: SelectolaxParser) -> bool:
     return True
 
 
+def _logs_are_published(tree: SelectolaxParser) -> bool:
+    """True when the 2D replay viewer rendered at least one map.
+
+    A match with no replay renders only ``.lg-empty`` ("No 2D replay available
+    for this match"), so grading it reports the viewer's selectors as broken.
+    ``.lg-main`` is the viewer's outer layout container, not a selector under
+    test, so a redesign of the round markup still gets graded.
+    """
+    return tree.css_first(".lg-main") is not None
+
+
 def _readiness_for(label: str) -> Callable[[SelectolaxParser], bool]:
     """Readiness predicate for a witness of ``label``."""
-    return _vods_are_published if label == "match_detail" else _stats_are_published
+    if label == "match_detail":
+        return _vods_are_published
+    if label == "match_detail_logs":
+        return _logs_are_published
+    return _stats_are_published
 
 
 # ---------------------------------------------------------------------------

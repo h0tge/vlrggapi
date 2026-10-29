@@ -21,6 +21,7 @@ from tests.test_vlr_selectors import (
     _extract_match_ids,
     _extract_player_ids,
     _label_witnesses,
+    _logs_are_published,
     _no_witness_reason,
     _no_witness_result,
     _probe_indices,
@@ -608,6 +609,19 @@ VODS_PUBLISHED = """
 </html>
 """
 
+LOGS_NOT_PUBLISHED = """
+<html>
+  <div class="lg-empty">No 2D replay available for this match</div>
+</html>
+"""
+
+LOGS_PUBLISHED = """
+<html>
+  <div class="lg-main mod-side"><div class="lg-body"></div></div>
+  <div class="lg-empty">Loading&hellip;</div>
+</html>
+"""
+
 
 class _FakeClient:
     """Serves canned HTML per URL and records the requests it served."""
@@ -662,6 +676,12 @@ def test_vods_readiness_grades_a_match_with_no_watch_module():
     assert _vods_are_published(SelectolaxParser(MATCH_WITHOUT_WATCH)) is True
 
 
+def test_logs_readiness_sees_the_no_replay_empty_state():
+    """A published page still carries ``.lg-empty`` "Loading…" for idle maps."""
+    assert _logs_are_published(SelectolaxParser(LOGS_NOT_PUBLISHED)) is False
+    assert _logs_are_published(SelectolaxParser(LOGS_PUBLISHED)) is True
+
+
 def test_readiness_markers_are_not_the_selectors_under_test():
     """Readiness has to stay independent, or a real break would go blind.
 
@@ -670,7 +690,7 @@ def test_readiness_markers_are_not_the_selectors_under_test():
     check would skip instead of reporting that the VOD markup disappeared.
     """
     asserted = {sel for pc in PAGE_CHECKS for sel in (*pc.anchors, *pc.required)}
-    assert {".vm-stats-empty", ".sm-empty"}.isdisjoint(asserted)
+    assert {".vm-stats-empty", ".sm-empty", ".lg-main"}.isdisjoint(asserted)
 
 
 def test_probe_indices_always_starts_at_the_newest_page():
@@ -774,6 +794,23 @@ async def test_resolve_witnesses_only_returns_pages_that_have_the_data():
     assert resolved["match_detail_econ"] == [
         f"{VLR_BASE_URL}/3001/?game=all&tab=economy",
         f"{VLR_BASE_URL}/3002/?game=all&tab=economy",
+    ]
+
+
+@pytest.mark.anyio
+async def test_resolve_witnesses_skips_matches_without_a_replay():
+    """2026-10-29: logs fell through to the stats readiness, so match 777960
+    (no 2D replay) was graded and its viewer selectors were reported broken."""
+    ids = ["5000", "5001"]
+    listing = "".join(f'<a href="/{match_id}/slug">m</a>' for match_id in ids)
+    pages = {f"{VLR_BASE_URL}/matches/results": f"<html>{listing}</html>"}
+    for match_id, logs in zip(ids, (LOGS_NOT_PUBLISHED, LOGS_PUBLISHED), strict=True):
+        pages[f"{VLR_BASE_URL}/{match_id}/?game=all&tab=logs"] = logs
+
+    resolved = await resolve_witnesses(_FakeClient(pages))
+
+    assert resolved["match_detail_logs"] == [
+        f"{VLR_BASE_URL}/5001/?game=all&tab=logs"
     ]
 
 
