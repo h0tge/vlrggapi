@@ -358,10 +358,10 @@ async def test_vlr_events_does_not_cache_non_200_responses(monkeypatch):
     assert first["data"]["segments"] == []
     assert second["data"]["status"] == 200
     assert client.calls == [
-        ("https://www.vlr.gg/events", None),
-        ("https://www.vlr.gg/events", None),
-        ("https://www.vlr.gg/events", None),
-        ("https://www.vlr.gg/events", None),
+        ("https://www.vlr.gg/events", 30),
+        ("https://www.vlr.gg/events", 30),
+        ("https://www.vlr.gg/events", 30),
+        ("https://www.vlr.gg/events", 30),
     ]
     assert cache_manager.get(CACHE_TTL_EVENTS, "events", True, True, 1, False) == second
     cache_manager.clear_all()
@@ -466,10 +466,10 @@ async def test_vlr_match_detail_does_not_cache_non_200_responses(monkeypatch):
     assert first["data"]["segments"] == []
     assert second["data"]["status"] == 200
     assert client.calls == [
-        ("https://www.vlr.gg/123", None),
-        ("https://www.vlr.gg/123", None),
-        ("https://www.vlr.gg/123", None),
-        ("https://www.vlr.gg/123", None),
+        ("https://www.vlr.gg/123", 30),
+        ("https://www.vlr.gg/123", 30),
+        ("https://www.vlr.gg/123", 30),
+        ("https://www.vlr.gg/123", 30),
     ]
     assert cache_manager.get(CACHE_TTL_MATCH_DETAIL, "match_detail", "123") == second
     cache_manager.clear_all()
@@ -497,8 +497,8 @@ async def test_fetch_with_retries_retries_retryable_status_codes(monkeypatch):
 
     assert response.status_code == 200
     assert client.calls == [
-        ("https://example.test/resource", None),
-        ("https://example.test/resource", None),
+        ("https://example.test/resource", 30),
+        ("https://example.test/resource", 30),
     ]
 
 
@@ -527,8 +527,8 @@ async def test_fetch_with_retries_retries_request_errors(monkeypatch):
 
     assert response.status_code == 200
     assert client.calls == [
-        ("https://example.test/resource", None),
-        ("https://example.test/resource", None),
+        ("https://example.test/resource", 30),
+        ("https://example.test/resource", 30),
     ]
 
 
@@ -557,8 +557,8 @@ async def test_fetch_with_retries_retries_on_429(monkeypatch):
     assert response.status_code == 200
     assert len(sleep_calls) == 1
     assert client.calls == [
-        ("https://example.test/resource", None),
-        ("https://example.test/resource", None),
+        ("https://example.test/resource", 30),
+        ("https://example.test/resource", 30),
     ]
 
 

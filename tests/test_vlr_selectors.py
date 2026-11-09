@@ -301,7 +301,6 @@ PAGE_CHECKS: ClassVar[list[PageCheck]] = [
         anchors=[
             ".match-header-super",
             ".match-header-date",
-            ".match-header-note",
             ".match-header-vs-note",
             ".match-header-link.mod-1",
             ".match-header-link.mod-2",
@@ -354,6 +353,7 @@ PAGE_CHECKS: ClassVar[list[PageCheck]] = [
             ".match-histories-item-date",
             ".match-h2h-matches",
             ".vm-stats-gamesnav-item",
+            ".match-header-note",
         ],
         # Verified live on a 12-page sample:
         #   .mod-ot            2/12 — renders only on a match that went to
@@ -366,9 +366,13 @@ PAGE_CHECKS: ClassVar[list[PageCheck]] = [
         #                      witnesses can miss it for an entire window and
         #                      report a layout change that is not one (#190).
         #                      Drop it if it ever settles at 0/12.
+        #   .match-header-note map vetos: only when vlr.gg has them. Present on
+        #                      /753455, absent on /784794, /784778, /784766
+        #                      (checked 2026-11-09); the parser already skips it.
         data_conditional=[
             ".mod-ot",
             ".match-h2h-matches",
+            ".match-header-note",
         ],
     ),
     # --- Match detail performance tab ------------------------------------

@@ -108,7 +108,7 @@ async def test_vlr_rankings_preserves_current_output_shape(monkeypatch):
             ],
         }
     }
-    assert client.calls == [("https://www.vlr.gg/rankings/north-america", None)]
+    assert client.calls == [("https://www.vlr.gg/rankings/north-america", 30)]
     cache_manager.clear_all()
 
 

@@ -94,7 +94,7 @@ async def test_vlr_news_parses_fixture_shape(monkeypatch):
             ],
         }
     }
-    assert client.calls == [("https://www.vlr.gg/news", None)]
+    assert client.calls == [("https://www.vlr.gg/news", 30)]
     cache_manager.clear_all()
 
 
@@ -128,7 +128,7 @@ async def test_vlr_news_parses_live_like_markup_without_raw_text_splitting(monke
             ],
         }
     }
-    assert client.calls == [("https://www.vlr.gg/news", None)]
+    assert client.calls == [("https://www.vlr.gg/news", 30)]
     cache_manager.clear_all()
 
 
@@ -147,5 +147,5 @@ async def test_vlr_news_coalesces_concurrent_cache_misses(monkeypatch):
     first, second = await asyncio.gather(vlr_news(), vlr_news())
 
     assert first == second
-    assert client.calls == [("https://www.vlr.gg/news", None)]
+    assert client.calls == [("https://www.vlr.gg/news", 30)]
     cache_manager.clear_all()

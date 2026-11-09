@@ -178,7 +178,7 @@ async def fetch_with_retries(
     url: str,
     *,
     client: httpx.AsyncClient | None = None,
-    timeout: int | float | httpx.Timeout | None = None,
+    timeout: int | float | httpx.Timeout = DEFAULT_TIMEOUT,
     max_retries: int = DEFAULT_RETRIES,
     request_delay: float = DEFAULT_REQUEST_DELAY,
     use_etag: bool = False,
