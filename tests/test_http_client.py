@@ -23,3 +23,13 @@ async def test_default_call_sets_a_finite_timeout():
     client = _RecordingClient()
     await fetch_with_retries("https://www.vlr.gg/player/matches/9/", client=client)
     assert client.timeouts[0] is not None
+
+
+def test_upstream_rate_limit_reads_env(monkeypatch):
+    # Breaks if the limit goes back to a hard-coded number: the Render deploy tunes it with UPSTREAM_RATE_LIMIT.
+    import importlib
+    import utils.constants as constants
+    monkeypatch.setenv("UPSTREAM_RATE_LIMIT", "7")
+    assert importlib.reload(constants).UPSTREAM_RATE_LIMIT == 7
+    monkeypatch.delenv("UPSTREAM_RATE_LIMIT")
+    assert importlib.reload(constants).UPSTREAM_RATE_LIMIT == 25

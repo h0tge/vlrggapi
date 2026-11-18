@@ -1,6 +1,7 @@
 """
 Configuration constants for VLR.GG API
 """
+import os
 
 # Base URLs
 VLR_BASE_URL = "https://www.vlr.gg"
@@ -46,7 +47,8 @@ CIRCUIT_FAIL_MAX = 5
 CIRCUIT_RESET_TIMEOUT = 30.0
 
 # Upstream rate limiter (requests to VLR.GG)
-UPSTREAM_RATE_LIMIT = 10       # max requests per window
+# 25/min (one every ~2.4 s) is still a human browsing pace for vlr.gg; override per deploy with the env var.
+UPSTREAM_RATE_LIMIT = int(os.getenv("UPSTREAM_RATE_LIMIT", "25"))  # max requests per window
 UPSTREAM_RATE_WINDOW = 60      # window in seconds
 
 # Request hardening limits for expensive paginated scrapes
