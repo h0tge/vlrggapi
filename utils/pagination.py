@@ -18,7 +18,7 @@ from utils.constants import (
     MAX_MATCH_TIMEOUT,
     PAGINATION_SEMAPHORE_LIMIT,
 )
-from utils.http_client import get_http_client
+from utils.http_client import get_http_client, upstream_rate_limiter
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +128,7 @@ async def scrape_multiple_pages(
                 )
 
                 async with _pagination_semaphore:
+                    await upstream_rate_limiter.wait_if_needed()  # same vlr.gg quota as fetch_with_retries
                     resp = await client.get(url, timeout=config.timeout)
 
                 if resp.status_code != 200:

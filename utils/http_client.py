@@ -200,9 +200,6 @@ async def fetch_with_retries(
             f"Circuit open for {urlparse(url).netloc} — request to {url} blocked"
         )
 
-    if url.startswith(VLR_BASE_URL):
-        await upstream_rate_limiter.wait_if_needed()
-
     client = client or get_http_client()
     retries = max(1, max_retries)
     last_response: httpx.Response | None = None
@@ -217,6 +214,9 @@ async def fetch_with_retries(
         request_headers.update(extra_headers)
 
     for attempt in range(1, retries + 1):
+        # Every attempt is a request to vlr.gg, so every attempt waits for the shared quota.
+        if url.startswith(VLR_BASE_URL):
+            await upstream_rate_limiter.wait_if_needed()
         try:
             response = await client.get(url, timeout=timeout, headers=request_headers if request_headers else None)
         except httpx.RequestError as exc:
