@@ -780,6 +780,9 @@ Equivalent to `GET /v2/player?id=...&q=profile`; the query form is deprecated.
 }
 ```
 
+`current_team` and `past_teams` follow vlr.gg's «Current Teams» and «Past Teams» headings: without a current card
+`current_team` is empty, and any current card after the first is listed in `past_teams`.
+
 `team_name` and `period` are read from the card's rows, so a team name never carries its dates or the «Inactive
 from …» note (`name`, `dates` and `joined` can). `stage_place`, `stage_prize` and `stage_team` come from the first
 series row only (`[]`/`""` when absent); `prize` and `team` scan the whole item and can pick up a `$` from the event
