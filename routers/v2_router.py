@@ -154,10 +154,15 @@ async def v2_stats(
         200, ge=0, description="Minimum rounds played; lower it for event-scoped views"
     ),
     min_rating: float = Query(1.55, ge=0.0, description="Minimum rating on vlr.gg's 0-2 scale"),
+    tier: str = Query(
+        "all", description="Tier filter: all, vct, vcl, t3, gc, cg, off (ignored with event_id)"
+    ),
 ):
     if event_id is not None and not event_id.isdigit():
         raise HTTPException(status_code=400, detail="event_id must be a numeric ID")
-    result = await get_stats_data(region, timespan, event_id, map_name, min_rounds, min_rating)
+    result = await get_stats_data(
+        region, timespan, event_id, map_name, min_rounds, min_rating, tier
+    )
     return _wrap_v2(result)
 
 

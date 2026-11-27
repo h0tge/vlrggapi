@@ -60,8 +60,9 @@ async def get_stats_data(
     map_name: str = "all",
     min_rounds: int = 200,
     min_rating: float = 1.55,
+    tier: str = "all",
 ) -> dict:
-    return await vlr_stats(region, timespan, event_id, map_name, min_rounds, min_rating)
+    return await vlr_stats(region, timespan, event_id, map_name, min_rounds, min_rating, tier)
 
 
 async def get_rankings_data(region: str) -> dict:

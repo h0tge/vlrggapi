@@ -123,7 +123,7 @@ GET /v2/rankings?region=na
 </details>
 
 ### `GET /v2/stats`
-**Params:** `region` (required), `timespan` (required: 30/60/90/all), `event_id` (optional — numeric event ID, filters the stats to a single event) | **Cache:** 30 min
+**Params:** `region` (required), `timespan` (required: 30/60/90/all), `event_id` (optional — numeric event ID, filters the stats to a single event), `tier` (optional: `all` (default, every tier), `vct`, `vcl`, `t3`, `gc`, `cg`, `off`; ignored with `event_id`) | **Cache:** 30 min
 
 **Regions** (the `/stats` page taxonomy, distinct from `/rankings`): `all`, `americas`, `emea`, `pacific`, `china`, `intl`. Deprecated aliases are still accepted and normalized: `na`/`br` → `americas`, `eu` → `emea`, `ap`/`kr`/`jp`/`oce` → `pacific`, `cn` → `china`.
 
