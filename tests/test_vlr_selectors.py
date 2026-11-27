@@ -590,6 +590,7 @@ PAGE_CHECKS: ClassVar[list[PageCheck]] = [
             ".wf-avatar.mod-player img",
             ".flag",
             ".wf-module-item.player-event-item",
+            ".player-event-item span.ge-text-light",
             "a.wf-card.m-item",
             "a.wf-card.fc-flex.m-item",
             ".m-item-result",

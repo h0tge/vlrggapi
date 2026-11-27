@@ -724,14 +724,18 @@ Equivalent to `GET /v2/player?id=...&q=profile`; the query form is deprecated.
           "name": "Gentle Mates GC",
           "tag": "",
           "logo": "https://owcdn.net/img/6670153fa9120.png",
-          "joined": "joined in January 2026"
+          "joined": "joined in January 2026",
+          "team_name": "Gentle Mates GC",
+          "period": "joined in January 2026"
         },
         "past_teams": [
           {
             "name": "GIANTX GC",
             "tag": "",
             "dates": "January 2025 – August 2025",
-            "logo": "https://owcdn.net/img/657b2f3fcd199.png"
+            "logo": "https://owcdn.net/img/657b2f3fcd199.png",
+            "team_name": "GIANTX GC",
+            "period": "January 2025 – August 2025"
           }
         ],
         "agent_stats": [
@@ -763,7 +767,10 @@ Equivalent to `GET /v2/player?id=...&q=profile`; the query form is deprecated.
             "prize": "$1,760",
             "team": "Gentle Mates GC",
             "date": "2026",
-            "url": "https://www.vlr.gg/event/3028/game-changers-2026-emea-stage-3"
+            "url": "https://www.vlr.gg/event/3028/game-changers-2026-emea-stage-3",
+            "stage_place": [2, 2],
+            "stage_prize": "$1,760",
+            "stage_team": "Gentle Mates GC"
           }
         ],
         "total_winnings": "$15,077"
@@ -772,6 +779,11 @@ Equivalent to `GET /v2/player?id=...&q=profile`; the query form is deprecated.
   }
 }
 ```
+
+`team_name` and `period` are read from the card's rows, so a team name never carries its dates or the «Inactive
+from …» note (`name`, `dates` and `joined` can). `stage_place`, `stage_prize` and `stage_team` come from the first
+series row only (`[]`/`""` when absent); `prize` and `team` scan the whole item and can pick up a `$` from the event
+name or several rows. The old keys stay until clients move to the new ones.
 </details>
 
 ### `GET /v2/player/{player_id}/matches`
