@@ -4,6 +4,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 from selectolax.lexbor import LexborHTMLParser as HTMLParser
 
 import api.scrapers.stats as stats_mod
@@ -13,6 +14,7 @@ from api.scrapers.stats import (
     _selected_region,
     vlr_stats,
 )
+from main import app
 from utils.cache_manager import cache_manager
 from utils.constants import STATS_TIERS
 from utils.error_handling import validate_region
@@ -349,6 +351,30 @@ async def test_vlr_stats_requests_every_tier_so_the_ladder_is_not_vct_only(monke
 
 
 @pytest.mark.anyio
+async def test_vlr_stats_single_tier_is_sent_alone_and_cached_apart(monkeypatch):
+    """A tier-scoped call must not be answered from the all-tiers cache entry."""
+    fetch = _install_fake_fetch(monkeypatch)
+
+    await vlr_stats("emea", "60")
+    await vlr_stats("emea", "60", tier="vct")
+
+    query = parse_qs(urlparse(fetch.calls[-1]).query)
+    assert query["tier[]"] == ["vct"]
+
+
+def test_v2_stats_forwards_the_tier_and_rejects_unknown_ones(monkeypatch):
+    fetch = _install_fake_fetch(monkeypatch)
+    client = TestClient(app)
+
+    ok = client.get("/v2/stats?region=emea&timespan=60&tier=vct")
+    bad = client.get("/v2/stats?region=emea&timespan=60&tier=vtc")
+
+    assert ok.status_code == 200
+    assert parse_qs(urlparse(fetch.calls[-1]).query)["tier[]"] == ["vct"]
+    assert bad.status_code == 400
+
+
+@pytest.mark.anyio
 async def test_vlr_stats_repeats_only_the_array_valued_filters(monkeypatch):
     """The pair-list encoding must not expand a single-valued filter."""
     fetch = _install_fake_fetch(monkeypatch)
@@ -494,10 +520,10 @@ async def test_alias_normalizes_before_cache_key(monkeypatch):
 
     # cache entry is keyed on the canonical region, not the alias
     assert cache_manager.get(
-        stats_mod.CACHE_TTL_STATS, "stats", "americas", "60", "all", "all", 200, 1.55
+        stats_mod.CACHE_TTL_STATS, "stats", "americas", "60", "all", "all", 200, 1.55, "all"
     ) is not None
     assert cache_manager.get(
-        stats_mod.CACHE_TTL_STATS, "stats", "na", "60", "all", "all", 200, 1.55
+        stats_mod.CACHE_TTL_STATS, "stats", "na", "60", "all", "all", 200, 1.55, "all"
     ) is None
     # the fetched URL carries the canonical region
     data_calls = [c for c in fetch.calls if _region_of(c) is not None]

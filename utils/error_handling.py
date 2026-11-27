@@ -16,6 +16,7 @@ from utils.constants import (
     MAX_MATCH_TIMEOUT,
     STATS_MAP_IDS,
     STATS_REGIONS,
+    STATS_TIERS,
 )
 from utils.http_client import CircuitOpenError
 from utils.utils import region
@@ -153,6 +154,21 @@ def validate_stats_map(key: str) -> str:
             ),
         )
     return STATS_MAP_IDS[normalized]
+
+
+def validate_stats_tier(tier: str) -> tuple[str, ...]:
+    """Resolve a /stats tier to the ``tier[]`` values to send ("all" is every one).
+
+    Raises 400 for anything unknown, so a typo never changes the player set silently.
+    """
+    if tier == "all":
+        return STATS_TIERS
+    if tier not in STATS_TIERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid tier '{tier}'. Valid values: all, {', '.join(STATS_TIERS)}",
+        )
+    return (tier,)
 
 
 def validate_timespan(ts: str):

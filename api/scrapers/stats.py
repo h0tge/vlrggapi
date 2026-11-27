@@ -5,12 +5,13 @@ from urllib.parse import urlencode
 from fastapi import HTTPException
 
 from utils.cache_manager import cache_manager
-from utils.constants import CACHE_TTL_STATS, STATS_TIERS, VLR_BASE_URL, VLR_STATS_URL
+from utils.constants import CACHE_TTL_STATS, VLR_BASE_URL, VLR_STATS_URL
 from utils.error_handling import (
     handle_scraper_errors,
     raise_for_upstream_status,
     validate_stats_map,
     validate_stats_region,
+    validate_stats_tier,
     validate_timespan,
 )
 from utils.html_parsers import extract_text_content, parse_html
@@ -201,12 +202,14 @@ async def vlr_stats(
     map_name: str = "all",
     min_rounds: int = 200,
     min_rating: float = 1.55,
+    tier: str = "all",
 ):
     # Normalize alias -> canonical BEFORE the cache key is formed so na and americas
     # resolve to one entry, and validate up front so bad input fails without a fetch.
     region_key = validate_stats_region(region_key)
     validate_timespan(timespan)
     map_id = validate_stats_map(map_name)
+    tiers = validate_stats_tier(tier)
     min_rounds = max(0, int(min_rounds))
     min_rating = max(0.0, float(min_rating))
 
@@ -227,7 +230,7 @@ async def vlr_stats(
             ("event_group_id", "all"),
             ("event_id", resolved_event_id),
             ("region[]", region_key),
-            *(("tier[]", tier) for tier in STATS_TIERS),
+            *(("tier[]", t) for t in tiers),
             ("country", "all"),
             ("min_rounds", min_rounds),
             # vlr.gg expresses the rating floor on a x1000 integer scale.
@@ -313,4 +316,5 @@ async def vlr_stats(
         map_id,
         min_rounds,
         min_rating,
+        tier,
     )
