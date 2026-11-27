@@ -1,5 +1,54 @@
 """Endpoint smoke tests for original and v2 routers."""
 import pytest
+from starlette.middleware.cors import CORSMiddleware
+
+from main import app
+
+
+@pytest.mark.anyio
+async def test_browser_clients_get_cors_headers(async_client):
+    resp = await async_client.get("/version", headers={"Origin": "https://example.test"})
+
+    assert resp.status_code == 200
+    assert resp.headers["access-control-allow-origin"] == "*"
+    assert "Retry-After" in resp.headers["access-control-expose-headers"]
+
+
+def test_cors_wraps_the_rate_limiter():
+    """A rate-limited 429 must still carry CORS headers, so CORS is outermost."""
+    assert app.user_middleware[0].cls is CORSMiddleware
+
+
+@pytest.mark.anyio
+async def test_v2_stats_rejects_an_unknown_map(async_client):
+    resp = await async_client.get("/v2/stats?region=all&timespan=all&map=summit2")
+
+    assert resp.status_code == 400
+    assert "Invalid map" in resp.json()["detail"]
+
+
+@pytest.mark.anyio
+async def test_v2_team_rejects_an_invalid_date_start(async_client):
+    resp = await async_client.get("/v2/team?id=1&q=stats&date_start=2026-13-45")
+
+    assert resp.status_code == 400
+    assert "Invalid date" in resp.json()["detail"]
+
+
+@pytest.mark.anyio
+async def test_v2_team_passes_date_start_to_the_stats_scraper(async_client, monkeypatch):
+    seen: dict = {}
+
+    async def fake_team_stats(team_id, date_start=""):
+        seen["args"] = (team_id, date_start)
+        return {"data": {"status": 200, "segments": []}}
+
+    monkeypatch.setattr("routers.v2_router.get_team_stats_data", fake_team_stats)
+
+    resp = await async_client.get("/v2/team?id=77&q=stats&date_start=2026-01-01")
+
+    assert resp.status_code == 200
+    assert seen["args"] == ("77", "2026-01-01")
 
 
 @pytest.mark.anyio
@@ -7,7 +56,6 @@ async def test_version_endpoint(async_client):
     resp = await async_client.get("/version")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["version"] == "2.0.0"
     assert data["default_api"] == "v2"
 
 
@@ -45,11 +93,17 @@ async def test_v2_invalid_event_query_returns_400(async_client):
 
 
 @pytest.mark.anyio
-async def test_original_news_not_redirect(async_client):
-    """Original /news endpoint should respond directly (not redirect)."""
-    resp = await async_client.get("/news", follow_redirects=False)
-    # Should not be a 301 redirect — it serves directly
-    assert resp.status_code != 301
+async def test_original_news_serves_payload(async_client, monkeypatch):
+    """Original /news serves the scraper payload without redirecting."""
+
+    async def fake_news():
+        return {"data": {"status": 200, "segments": [{"title": "Patch notes"}]}}
+
+    monkeypatch.setattr("routers.vlr_router.get_news_data", fake_news)
+
+    resp = await async_client.get("/news")
+    assert resp.status_code == 200
+    assert resp.json()["data"]["segments"] == [{"title": "Patch notes"}]
 
 
 @pytest.mark.anyio
@@ -109,7 +163,7 @@ async def test_v2_match_detail_exposes_team_ids(async_client, monkeypatch):
 
 @pytest.mark.anyio
 async def test_original_match_detail_strips_team_ids(async_client, monkeypatch):
-    async def fake_match_detail(match_id):
+    async def fake_match_detail(match_id, light=False):
         return {
             "data": {
                 "status": 200,

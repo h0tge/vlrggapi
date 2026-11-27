@@ -2,8 +2,9 @@
 Validate that CSS selectors used by vlrggapi scrapers still resolve
 against live vlr.gg HTML.
 
-Run this standalone or via pytest. Fails fast when vlr.gg changes break
-our parsing pipeline *before* the API starts returning errors.
+Run via pytest, or ``python -m tests.test_vlr_selectors``. Fails fast when
+vlr.gg changes break our parsing pipeline *before* the API starts returning
+errors.
 
 How it works
 ------------
@@ -16,9 +17,10 @@ went quiet, which is how issues like #183 produced false alarms.
 So every page type declares:
 
 ``anchors``
-    Selectors that must be present on **every** fetched page. These prove the
-    page really is what we think it is (not a rate-limit wall, a redirect, or
-    an empty shell). A missing anchor is a real failure.
+    Selectors that identify the page type. Matching any one accepts a fetched
+    page; a page carrying none is discarded as a partial render (a rate-limit
+    wall, a redirect, or an empty shell). An anchor absent from every usable
+    page still fails, because anchors are witnessed like ``required``.
 
 ``required``
     Selectors that must be **witnessed on at least one** fetched page for that
@@ -69,7 +71,7 @@ from typing import ClassVar
 
 import httpx
 import pytest
-from selectolax.parser import HTMLParser as SelectolaxParser
+from selectolax.lexbor import LexborHTMLParser as SelectolaxParser
 
 from utils.constants import VLR_BASE_URL
 
@@ -147,24 +149,45 @@ def _vods_are_published(tree: SelectolaxParser) -> bool:
     return True
 
 
-def _logs_are_published(tree: SelectolaxParser) -> bool:
-    """True when the 2D replay viewer rendered at least one map.
+# Markup that only a published 2D replay carries, inside the active game block.
+_REPLAY_MARKERS = (".lg-band", ".lg-round", ".lg-map")
 
-    A match with no replay renders only ``.lg-empty`` ("No 2D replay available
-    for this match"), so grading it reports the viewer's selectors as broken.
-    ``.lg-main`` is the viewer's outer layout container, not a selector under
-    test, so a redesign of the round markup still gets graded.
+
+def _replay_is_published(tree: SelectolaxParser) -> bool:
+    """True unless the active game block says its 2D replay is unavailable.
+
+    The logs tab renders one ``.vm-stats-game`` per map plus an "all maps" block,
+    and every one of them starts with ``.lg-empty``; only the ``mod-active``
+    block reflects what the URL is showing. A match whose replay vlr.gg has not
+    processed yet (seen on VCT China results for hours after they ended) renders
+    ``.lg-empty`` there and no replay markup, while its stats are already
+    published - which is why the stats predicate called it a witness and the
+    check then reported three intact selectors as broken.
+
+    Replay markup wins over a leftover placeholder, and anything unrecognised (no
+    active block, a lazily loaded active block, or an active block with neither)
+    is graded rather than skipped, so a markup move fails loudly instead of
+    making every witness look unready.
     """
-    return tree.css_first(".lg-main") is not None
+    active = tree.css_first(".vm-stats-game.mod-active")
+    if active is None:
+        return True
+    if any(active.css_first(selector) is not None for selector in _REPLAY_MARKERS):
+        return True
+    if "js-lg-lazy" in (active.attributes.get("class") or ""):
+        return True
+    return active.css_first(".lg-empty") is None
+
+
+_READINESS_PREDICATES: dict[str, Callable[[SelectolaxParser], bool]] = {
+    "match_detail": _vods_are_published,
+    "match_detail_logs": _replay_is_published,
+}
 
 
 def _readiness_for(label: str) -> Callable[[SelectolaxParser], bool]:
-    """Readiness predicate for a witness of ``label``."""
-    if label == "match_detail":
-        return _vods_are_published
-    if label == "match_detail_logs":
-        return _logs_are_published
-    return _stats_are_published
+    """Readiness predicate for a witness of ``label`` (stats unless mapped)."""
+    return _READINESS_PREDICATES.get(label, _stats_are_published)
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +206,7 @@ class PageCheck:
     label: str  # human-readable test name
     urls: list[str]  # witness pages for this page type
     source: str = ""  # scraper file(s) that use these selectors
-    anchors: list[str] = field(default_factory=list)  # must hold on every URL
+    anchors: list[str] = field(default_factory=list)  # any one identifies the page type
     required: list[str] = field(default_factory=list)  # must hold on >= 1 URL
     optional: list[str] = field(default_factory=list)  # reported if on no URL
     # Optional selectors whose absence from the witness set is *explained*, so
@@ -196,7 +219,7 @@ class PageCheck:
     #     of pages while vlr.gg finishes rolling out its replacement.
     # Anything else belongs in ``optional``, where CI does escalate absence.
     data_conditional: list[str] = field(default_factory=list)
-    discovery: str = ""  # witness-discovery key, resolved in default_witnesses()
+    discovery: str = ""  # witness-discovery key, resolved in resolve_witnesses()
 
 
 @dataclass
@@ -366,9 +389,14 @@ PAGE_CHECKS: ClassVar[list[PageCheck]] = [
         #                      witnesses can miss it for an entire window and
         #                      report a layout change that is not one (#190).
         #                      Drop it if it ever settles at 0/12.
-        #   .match-header-note map vetos: only when vlr.gg has them. Present on
-        #                      /753455, absent on /784794, /784778, /784766
-        #                      (checked 2026-11-09); the parser already skips it.
+        #   .match-header-note 8/10 — the header note carries the map vetoes
+        #                      ("X ban Haven; ..."). vlr.gg omits it on matches
+        #                      with no published vetoes, so a witness set drawn
+        #                      from those matches reports a break that is not
+        #                      one (#240). Verified live on 2026-11-08 against
+        #                      10 recent completed matches; the parser guards
+        #                      the lookup and yields an empty map_vetos, so the
+        #                      API degrades rather than failing.
         data_conditional=[
             ".mod-ot",
             ".match-h2h-matches",
@@ -770,7 +798,6 @@ PAGE_CHECKS: ClassVar[list[PageCheck]] = [
 # ---------------------------------------------------------------------------
 
 # How many pages a discovery-backed check will actually fetch and grade.
-_MAX_WITNESSES = 3
 _MATCH_DETAIL_WITNESSES = 3
 _MATCH_TAB_WITNESSES = 2
 _PLAYER_WITNESSES = 2
@@ -826,19 +853,6 @@ def _witness_limit(label: str) -> int:
     return _MATCH_DETAIL_WITNESSES if label == "match_detail" else _MATCH_TAB_WITNESSES
 
 
-def _label_witnesses(label: str, match_ids: list[str], limit: int | None = None) -> list[str]:
-    """Build the witness URL list for one match-backed page type.
-
-    An empty ``match_ids`` yields an empty witness list on purpose — see the
-    module docstring: a stand-in fixture is how #183 reported a layout change
-    every day for a match that had simply gone quiet.
-    """
-    if label not in ("match_detail", *_MATCH_TAB_BY_LABEL):
-        raise ValueError(f"no witness builder for label: {label}")
-    count = _witness_limit(label) if limit is None else limit
-    return [_witness_url(label, match_id) for match_id in match_ids[:count]]
-
-
 def _probe_indices(count: int, limit: int | None = None) -> list[int]:
     """Candidate indices to probe: the newest page, then an even spread.
 
@@ -864,7 +878,6 @@ async def _settled_witnesses(
     client: httpx.AsyncClient,
     label: str,
     match_ids: list[str],
-    limit: int | None = None,
 ) -> list[str]:
     """Witness URLs whose match has already published the data we assert.
 
@@ -873,7 +886,7 @@ async def _settled_witnesses(
     selectors as a layout change. Candidates that are not readable are skipped:
     a failed probe says nothing about our selectors either way.
     """
-    wanted = _witness_limit(label) if limit is None else limit
+    wanted = _witness_limit(label)
     candidates = [_witness_url(label, match_id) for match_id in match_ids]
     ready = _readiness_for(label)
 
@@ -895,7 +908,7 @@ async def _settled_witnesses(
         probed = min(len(candidates), _MAX_WITNESS_PROBES)
         _READINESS_NOTES[label] = (
             f"{probed} candidate page(s) probed for {label}, but none had "
-            f"published stats/VODs, so no selector was asserted"
+            f"published stats/VODs/2D replay, so no selector was asserted"
         )
     return picked
 
@@ -1107,8 +1120,6 @@ def grade_page(pc: PageCheck, pages: list[PageData]) -> dict:
 
 _REPORT_PATH = os.environ.get("SELECTOR_REPORT_PATH", "")
 
-_FULL_REPORT: list[dict] = []
-
 # Graded results keyed by page label, fetched once per pytest session.
 _RESULTS: dict[str, dict] = {}
 _RESULTS_LOCK = asyncio.Lock()
@@ -1259,52 +1270,5 @@ async def test_vlr_selectors(pc: PageCheck):
 
 
 # ---------------------------------------------------------------------------
-# Standalone runner (python -m pytest tests/test_vlr_selectors.py)
+# Standalone runner (python -m tests.test_vlr_selectors)
 # ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    import anyio
-
-    async def _main():
-        print("vlr.gg CSS selector validation")
-        print("=" * 60)
-
-        all_ok = True
-        async with _client() as client:
-            witnesses = await _witnesses_for(client)
-            for pc in PAGE_CHECKS:
-                urls = witnesses[pc.label]
-                if not urls:
-                    # No witness is not a break — see _no_witness_result.
-                    print(f"  [{pc.label:20s}] UNVERIFIABLE: {_no_witness_reason(pc)}")
-                    continue
-
-                pages, fetch_error = await fetch_pages(client, urls)
-                if not pages:
-                    print(f"  [{pc.label:20s}] FETCH ERROR: {fetch_error}")
-                    all_ok = False
-                    continue
-
-                result = grade_page(pc, pages)
-                req = result["broken_required"]
-                opt = result["broken_optional"]
-                print(
-                    f"  [{pc.label:20s}] witnessed={result['witnessed_count']}"
-                    f"/{result['total_required']} pages={result['pages_usable']}"
-                )
-                if result["unverifiable"]:
-                    print(f"    UNVERIFIABLE: {result['unverifiable_reason']}")
-                    for url in result["unusable_pages"]:
-                        print(f"      unusable: {url}")
-                    continue
-                for selector in req:
-                    print(f"    REQUIRED MISSING: {selector}")
-                    all_ok = False
-                for selector in opt:
-                    print(f"    optional missing: {selector}")
-
-        print("\nAll critical selectors OK." if all_ok else "\nSome selectors are broken!")
-        if not all_ok:
-            sys.exit(1)
-
-    anyio.run(_main)

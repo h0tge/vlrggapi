@@ -19,13 +19,11 @@ from api.scrapers import (
     vlr_search,
     vlr_stats,
     vlr_team,
-    vlr_team_history,
     vlr_team_matches,
     vlr_team_roster,
     vlr_team_schedule,
     vlr_team_stats,
     vlr_team_transactions,
-    vlr_team_upcoming,
     vlr_upcoming_matches,
     vlr_upcoming_matches_extended,
 )
@@ -55,8 +53,15 @@ async def get_news_data() -> dict:
     return await vlr_news()
 
 
-async def get_stats_data(region: str, timespan: str, event_id: str = "all") -> dict:
-    return await vlr_stats(region, timespan, event_id)
+async def get_stats_data(
+    region: str,
+    timespan: str,
+    event_id: str | None = None,
+    map_name: str = "all",
+    min_rounds: int = 200,
+    min_rating: float = 1.55,
+) -> dict:
+    return await vlr_stats(region, timespan, event_id, map_name, min_rounds, min_rating)
 
 
 async def get_rankings_data(region: str) -> dict:
@@ -139,14 +144,6 @@ async def get_team_transactions_data(team_id: str) -> dict:
 
 async def get_team_stats_data(team_id: str, date_start: str = "") -> dict:
     return await vlr_team_stats(team_id, date_start)
-
-
-async def get_team_history_data(team_id: str) -> dict:
-    return await vlr_team_history(team_id)
-
-
-async def get_team_upcoming_data(team_id: str) -> dict:
-    return await vlr_team_upcoming(team_id)
 
 
 async def get_team_roster_data(team_id: str) -> dict:

@@ -74,28 +74,27 @@ async def vlr_match_detail(match_id: str, light: bool = False) -> dict:
     Scrape a single VLR.GG match page and return structured match data.
 
     Fetches the base page, then concurrently fetches the performance and
-    economy tabs for the first game. Cache TTL is 30 s for live matches
-    and 300 s for completed matches. When ``light`` is True, the per-map
-    performance/economy tabs are skipped (upcoming matches have no stats),
-    returning header, teams, lineups and map data only.
+    economy tabs for every game. Cache TTL is 30 s for live matches and
+    300 s for completed matches. With ``light`` the per-map tabs are skipped
+    (upcoming matches have no stats yet), leaving header, teams, maps and
+    head-to-head at roughly one request instead of one per game per tab.
     """
     base_url = f"{VLR_BASE_URL}/{match_id}"
+    cache_key = ("match_detail", match_id, bool(light))
 
-    cache_args = ("match_detail", match_id) if not light else ("match_detail", match_id, light)
-
-    cached = cache_manager.get(CACHE_TTL_MATCH_DETAIL_LIVE, *cache_args)
+    cached = cache_manager.get(CACHE_TTL_MATCH_DETAIL_LIVE, *cache_key)
     if cached is not None:
         return cached
-    cached = cache_manager.get(CACHE_TTL_MATCH_DETAIL, *cache_args)
+    cached = cache_manager.get(CACHE_TTL_MATCH_DETAIL, *cache_key)
     if cached is not None:
         return cached
 
     async def build():
-        cached_live = cache_manager.get(CACHE_TTL_MATCH_DETAIL_LIVE, *cache_args)
+        cached_live = cache_manager.get(CACHE_TTL_MATCH_DETAIL_LIVE, *cache_key)
         if cached_live is not None:
             return cached_live
 
-        cached_complete = cache_manager.get(CACHE_TTL_MATCH_DETAIL, *cache_args)
+        cached_complete = cache_manager.get(CACHE_TTL_MATCH_DETAIL, *cache_key)
         if cached_complete is not None:
             return cached_complete
 
@@ -195,8 +194,8 @@ async def vlr_match_detail(match_id: str, light: bool = False) -> dict:
 
         live = _is_live(base_html)
         ttl = CACHE_TTL_MATCH_DETAIL_LIVE if live else CACHE_TTL_MATCH_DETAIL
-        cache_manager.set_if_cacheable(ttl, data, *cache_args)
+        cache_manager.set_if_cacheable(ttl, data, *cache_key)
 
         return data
 
-    return await cache_manager.coalesce_async(f"match_detail:{match_id}:{light}", build)
+    return await cache_manager.coalesce_async(f"match_detail:{match_id}:{bool(light)}", build)

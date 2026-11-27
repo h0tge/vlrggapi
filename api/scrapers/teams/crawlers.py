@@ -6,10 +6,8 @@ Provides async scraper functions:
   - vlr_team_stats: per-map statistics
   - vlr_team_matches: paginated match history
   - vlr_team_transactions: roster transaction log
-  - vlr_team_history: categorized roster with transaction enrichment (fork)
-  - vlr_team_roster: grouped roster by category (upstream)
-  - vlr_team_upcoming: upcoming matches from team page sidebar (fork)
-  - vlr_team_schedule: upcoming matches from team page sidebar (upstream)
+  - vlr_team_roster: grouped roster by category (active/staff/former/benched)
+  - vlr_team_schedule: upcoming matches from team page sidebar
 """
 import logging
 import re
@@ -19,14 +17,11 @@ from fastapi import HTTPException
 from utils.cache_manager import cache_manager
 from utils.constants import (
     CACHE_TTL_TEAM,
-    CACHE_TTL_TEAM_HISTORY,
     CACHE_TTL_TEAM_MATCHES,
     CACHE_TTL_TEAM_ROSTER,
     CACHE_TTL_TEAM_SCHEDULE,
     CACHE_TTL_TEAM_STATS,
     CACHE_TTL_TEAM_TRANSACTIONS,
-    CACHE_TTL_UPCOMING,
-    VLR_BASE_URL,
     VLR_TEAM_URL,
 )
 from utils.error_handling import handle_scraper_errors
@@ -35,7 +30,6 @@ from utils.http_client import fetch_with_retries, get_http_client
 
 from .parsers import (
     _normalize_ws,
-    _parse_categorized_roster,
     _parse_event_placements,
     _parse_grouped_roster,
     _parse_rating_info,
@@ -43,7 +37,6 @@ from .parsers import (
     _parse_team_fixture,
     _parse_team_header,
     _parse_team_match_item,
-    _parse_team_upcoming_item,
     _parse_transaction_item,
     _text,
 )
@@ -55,9 +48,9 @@ logger = logging.getLogger(__name__)
 async def vlr_team_stats(team_id: str, date_start: str = "") -> dict:
     """Scrape per-map statistics from the team stats page.
 
-    ``date_start`` (YYYY-MM-DD) restricts the window to matches played on/after
-    that date — VLR only honors it via the ``date_start`` query param (not
-    ``timespan``). Empty means the full career record.
+    ``date_start`` (YYYY-MM-DD) restricts the window to matches played on or
+    after that day; vlr.gg only honours it as a query parameter, not via a
+    timespan. Empty means the full career record.
     """
     cache_key = ("team_stats", team_id, date_start)
 
@@ -259,84 +252,6 @@ async def vlr_team_transactions(team_id: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Team history — categorized roster with transaction enrichment (fork endpoint)
-# ---------------------------------------------------------------------------
-
-
-@handle_scraper_errors
-async def vlr_team_history(team_id: str) -> dict:
-    """Scrape team roster history with categorized player groups.
-
-    Custom fork endpoint that groups players into active/staff/former/benched
-    with transaction date enrichment.
-    """
-    cache_key = ("team_history", team_id)
-
-    async def build():
-        url = f"{VLR_BASE_URL}/team/{team_id}"
-        client = get_http_client()
-        resp = await fetch_with_retries(url, client=client)
-        status = resp.status_code
-
-        if status >= 400:
-            logger.warning("Non-200 response %d for team history %s", status, team_id)
-            raise HTTPException(
-                status_code=status,
-                detail=f"VLR.GG returned status {status} for team history {team_id}",
-            )
-
-        html = parse_html(resp.text)
-        categorized = _parse_categorized_roster(html)
-
-        transactions_result = None
-        try:
-            transactions_result = await vlr_team_transactions(team_id)
-        except Exception:
-            pass
-
-        transactions = []
-        tx_by_name: dict[str, dict] = {}
-        if transactions_result:
-            transactions = transactions_result.get("data", {}).get("segments", [])
-            for tx in transactions:
-                pname = (tx.get("player") or {}).get("name", "").lower().strip()
-                if pname:
-                    if pname not in tx_by_name:
-                        tx_by_name[pname] = {}
-                    date = tx.get("date", "")
-                    action = tx.get("action", "")
-                    if "join" in action or "signed" in action:
-                        if not tx_by_name[pname].get("date_joined") or date > tx_by_name[pname]["date_joined"]:
-                            tx_by_name[pname]["date_joined"] = date
-                    elif any(k in action for k in ("left", "released", "benched", "inactive")):
-                        if not tx_by_name[pname].get("date_left") or date > tx_by_name[pname]["date_left"]:
-                            tx_by_name[pname]["date_left"] = date
-
-        for group_key in ("former", "benched"):
-            for player in categorized[group_key]:
-                pname = player.get("alias", "").lower().strip()
-                if pname in tx_by_name:
-                    if tx_by_name[pname].get("date_joined"):
-                        player["date_joined"] = tx_by_name[pname]["date_joined"]
-                    if tx_by_name[pname].get("date_left"):
-                        player["date_left"] = tx_by_name[pname]["date_left"]
-
-        segment = {
-            "active_players": categorized["active"],
-            "staff": categorized["staff"],
-            "former_players": categorized["former"],
-            "benched_players": categorized["benched"],
-            "transactions": transactions,
-        }
-
-        return {"data": {"status": status, "segments": [segment]}}
-
-    return await cache_manager.get_or_create_async(
-        CACHE_TTL_TEAM_HISTORY, build, *cache_key
-    )
-
-
-# ---------------------------------------------------------------------------
 # Grouped roster scraper — splits roster into active / staff / former / benched
 # and enriches former/benched players with transaction date spans.
 # ---------------------------------------------------------------------------
@@ -346,11 +261,11 @@ async def vlr_team_history(team_id: str) -> dict:
 async def vlr_team_roster(team_id: str) -> dict:
     """Scrape the team profile roster categorized by status group.
 
-    Fetches ``/team/{team_id}`` and ``/team/transactions/{team_id}/``
-    concurrently. The roster is grouped into ``active``, ``staff``,
-    ``former``, and ``benched``. Former and benched players are enriched
-    with ``date_joined`` / ``date_left`` from the transaction log when
-    a matching entry is found.
+    Fetches ``/team/{team_id}``, then ``/team/transactions/{team_id}/``.
+    The roster is grouped into ``active``, ``staff``, ``former``, and
+    ``benched``. Former and benched players are enriched with
+    ``date_joined`` / ``date_left`` from the transaction log when a
+    matching entry is found.
 
     Args:
         team_id: Numeric VLR.GG team identifier.
@@ -378,7 +293,7 @@ async def vlr_team_roster(team_id: str) -> dict:
         html = parse_html(resp.text)
         grouped = _parse_grouped_roster(html)
 
-        # Fetch transactions concurrently so we can enrich former/benched players
+        # Fetch transactions to enrich former/benched players
         transactions_result = None
         transactions: list[dict] = []
         try:
@@ -428,60 +343,6 @@ async def vlr_team_roster(team_id: str) -> dict:
 
     return await cache_manager.get_or_create_async(
         CACHE_TTL_TEAM_ROSTER, build, *cache_key
-    )
-
-
-# ---------------------------------------------------------------------------
-# Team upcoming matches — fork endpoint from team page sidebar
-# ---------------------------------------------------------------------------
-
-
-@handle_scraper_errors
-async def vlr_team_upcoming(team_id: str) -> dict:
-    """Scrape upcoming matches listed on a team's profile page."""
-    cache_key = ("team_upcoming", team_id)
-
-    async def build():
-        url = f"{VLR_BASE_URL}/team/{team_id}"
-        client = get_http_client()
-        resp = await fetch_with_retries(url, client=client)
-        status = resp.status_code
-
-        if status >= 400:
-            logger.warning("Non-200 response %d for team upcoming %s", status, team_id)
-            raise HTTPException(
-                status_code=status,
-                detail=f"VLR.GG returned status {status} for team upcoming {team_id}",
-            )
-
-        html = parse_html(resp.text)
-        matches: list[dict] = []
-
-        selectors = [
-            "a.wf-card.m-item",
-            "a.m-item",
-            ".wf-card a.m-item",
-        ]
-        items = []
-        for sel in selectors:
-            items = html.css(sel)
-            if items:
-                break
-
-        if not items:
-            content = html.css_first(".col.mod-1") or html.css_first(".col")
-            if content:
-                items = content.css("a[href*='/match/']")
-
-        for item in items:
-            parsed = _parse_team_upcoming_item(item)
-            if parsed is not None:
-                matches.append(parsed)
-
-        return {"data": {"status": status, "segments": matches}}
-
-    return await cache_manager.get_or_create_async(
-        CACHE_TTL_UPCOMING, build, *cache_key
     )
 
 

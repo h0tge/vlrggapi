@@ -4,7 +4,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 from fastapi import HTTPException
-from selectolax.parser import HTMLParser
+from selectolax.lexbor import LexborHTMLParser as HTMLParser
 
 import api.scrapers.stats as stats_mod
 from api.scrapers.stats import (
@@ -14,6 +14,7 @@ from api.scrapers.stats import (
     vlr_stats,
 )
 from utils.cache_manager import cache_manager
+from utils.constants import STATS_TIERS
 from utils.error_handling import validate_region
 
 # ---------------------------------------------------------------------------
@@ -24,31 +25,12 @@ from utils.error_handling import validate_region
 STATS_HTML = """
 <html>
   <table>
-    <thead>
-      <tr>
-        <th></th>
-        <th data-col="agents">Agents</th>
-        <th data-col="rnd">Rounds</th>
-        <th data-col="rating2">Rating 2.0</th>
-        <th data-col="acs">ACS</th>
-        <th data-col="kd">K/D</th>
-        <th data-col="kast">KAST</th>
-        <th data-col="adr">ADR</th>
-        <th data-col="kpr">KPR</th>
-        <th data-col="apr">APR</th>
-        <th data-col="fbpr">FK/FR</th>
-        <th data-col="fdpr">FD/FR</th>
-        <th data-col="hsp">HS%</th>
-        <th data-col="clp">CL%</th>
-        <th data-col="cl">CL</th>
-      </tr>
-    </thead>
     <tbody>
       <tr>
         <td class="mod-player mod-a">
           <a>
             <div class="text-of">TenZ Prime</div>
-            <div class="st-pl-country">Team Liquid</div>
+            <div class="stats-player-country">Team Liquid</div>
           </a>
         </td>
         <td class="mod-agents">
@@ -286,6 +268,11 @@ def test_build_column_map_keys_align_with_td_positions():
     assert col_map["cl"] == 16
 
 
+def test_build_column_map_none_for_legacy_markup():
+    tree = HTMLParser(STATS_HTML)
+    assert _build_column_map(tree) is None
+
+
 # ---------------------------------------------------------------------------
 # Org selector fallback (D2)
 # ---------------------------------------------------------------------------
@@ -327,6 +314,55 @@ def test_org_selector_missing_defaults_na():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.anyio
+async def test_vlr_stats_custom_map_and_floors_reach_the_request(monkeypatch):
+    fetch = _install_fake_fetch(monkeypatch)
+
+    await vlr_stats("americas", "all", None, "ascent", 0, 1.0)
+
+    query = parse_qs(urlparse(fetch.calls[-1]).query)
+    assert query["map_id"] == ["5"]
+    assert query["min_rounds"] == ["0"]
+    assert query["min_rating"] == ["1000"]
+
+
+@pytest.mark.anyio
+async def test_vlr_stats_defaults_keep_the_previous_contract(monkeypatch):
+    fetch = _install_fake_fetch(monkeypatch)
+
+    await vlr_stats("americas", "60")
+
+    query = parse_qs(urlparse(fetch.calls[-1]).query)
+    assert query["map_id"] == ["all"]
+    assert query["min_rounds"] == ["200"]
+    assert query["min_rating"] == ["1550"]
+
+
+@pytest.mark.anyio
+async def test_vlr_stats_requests_every_tier_so_the_ladder_is_not_vct_only(monkeypatch):
+    """Omitting tier[] lets vlr.gg fall back to its data-defaults value of vct."""
+    fetch = _install_fake_fetch(monkeypatch)
+
+    await vlr_stats("emea", "60")
+
+    query = parse_qs(urlparse(fetch.calls[-1]).query)
+    assert query["tier[]"] == list(STATS_TIERS)
+
+
+@pytest.mark.anyio
+async def test_vlr_stats_repeats_only_the_array_valued_filters(monkeypatch):
+    """The pair-list encoding must not expand a single-valued filter."""
+    fetch = _install_fake_fetch(monkeypatch)
+
+    await vlr_stats("americas", "all", None, "ascent", 0, 1.0)
+
+    query = parse_qs(urlparse(fetch.calls[-1]).query)
+    assert query["region[]"] == ["americas"]
+    assert query["map_id"] == ["5"]
+    assert query["min_rating"] == ["1000"]
+    assert len(query["tier[]"]) == len(STATS_TIERS)
+
+
+@pytest.mark.anyio
 async def test_vlr_stats_new_markup_end_to_end(monkeypatch):
     fetch = _install_fake_fetch(monkeypatch)
 
@@ -350,23 +386,6 @@ async def test_vlr_stats_new_markup_end_to_end(monkeypatch):
     # prime fired first, exactly once, before the data fetch
     assert _region_of(fetch.calls[0]) is None
     assert _region_of(fetch.calls[1]) == "americas"
-
-
-@pytest.mark.anyio
-async def test_vlr_stats_filters_by_event_id(monkeypatch):
-    fetch = _install_fake_fetch(monkeypatch)
-
-    await vlr_stats("americas", "60", "2952")
-
-    # Event-filtered stats scrape the event-scoped page (the global /stats filter
-    # ignores event_id for some events), not the global /stats page.
-    data_call = next(c for c in fetch.calls if "/event/stats/2952" in c)
-    assert "event/stats/2952" in data_call
-    assert "event_id=2952" not in data_call
-    # No rounds floor on the event-scoped page: a player eliminated in groups
-    # (few rounds) must still show up.
-    assert "min_rounds=0" in data_call
-    assert "min_rating=0" in data_call
 
 
 @pytest.mark.anyio
@@ -474,8 +493,12 @@ async def test_alias_normalizes_before_cache_key(monkeypatch):
     await vlr_stats("na", "60")
 
     # cache entry is keyed on the canonical region, not the alias
-    assert cache_manager.get(stats_mod.CACHE_TTL_STATS, "stats", "americas", "60", "all") is not None
-    assert cache_manager.get(stats_mod.CACHE_TTL_STATS, "stats", "na", "60", "all") is None
+    assert cache_manager.get(
+        stats_mod.CACHE_TTL_STATS, "stats", "americas", "60", "all", "all", 200, 1.55
+    ) is not None
+    assert cache_manager.get(
+        stats_mod.CACHE_TTL_STATS, "stats", "na", "60", "all", "all", 200, 1.55
+    ) is None
     # the fetched URL carries the canonical region
     data_calls = [c for c in fetch.calls if _region_of(c) is not None]
     assert _region_of(data_calls[0]) == "americas"
@@ -595,3 +618,17 @@ def test_rankings_region_americas_still_400():
     with pytest.raises(HTTPException) as exc:
         validate_region("americas")
     assert exc.value.status_code == 400
+
+
+@pytest.mark.anyio
+async def test_vlr_stats_event_id_scrapes_the_event_page(monkeypatch):
+    """2026-11-27: /stats?event_id=2952 (EWC 2026) returned 100 players from other
+    events; /event/stats/2952 returned its 80. Breaking edit: drop the event branch
+    and pass event_id to the global /stats filter."""
+    fetch = _install_fake_fetch(monkeypatch)
+
+    await vlr_stats("all", "all", "2952")
+
+    data_call = next(c for c in fetch.calls if "/event/stats/2952" in c)
+    assert "min_rounds=0" in data_call
+    assert "min_rating=0" in data_call

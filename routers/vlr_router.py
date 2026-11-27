@@ -97,7 +97,7 @@ async def VLR_ranks(
         "oce": "oceania",\n
         "kr": "korea",\n
         "mn": "mena",\n
-        "gc": "game-changers",\n
+        "gc": "gc",\n
         "br": "Brazil",\n
         "cn": "china",\n
         "jp": "japan",\n
@@ -145,7 +145,7 @@ async def VLR_events(
         None,
         description="Event type filter",
         examples=["completed"],
-        enum=["upcoming", "completed", "live"]
+        json_schema_extra={"enum": ["upcoming", "completed", "live"]}
     ),
     page: int = Query(
         1,
