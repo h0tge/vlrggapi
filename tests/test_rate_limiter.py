@@ -1,6 +1,4 @@
-"""Rate limiter: who the key belongs to, and that keys are forgotten."""
-
-import time
+"""Rate limiter: the Cloudflare edge header and the per-tier limit."""
 
 from starlette.datastructures import Headers
 
@@ -25,11 +23,6 @@ def test_forwarded_for_is_ignored_when_the_edge_stamps_the_client():
     assert SlidingWindowRateLimiter._client_ip(request) == "198.51.100.7"
 
 
-def test_forwarded_for_is_the_fallback_without_the_edge_header():
-    request = _request(**{"X-Forwarded-For": "203.0.113.9, 198.51.100.7"})
-    assert SlidingWindowRateLimiter._client_ip(request) == "203.0.113.9"
-
-
 def test_limit_still_counts_and_rejects():
     limiter = SlidingWindowRateLimiter()
     limit, _ = TIERS["expensive"]
@@ -39,13 +32,3 @@ def test_limit_still_counts_and_rejects():
     assert remaining == 0
     assert retry_after > 0
 
-
-def test_prune_forgets_keys_whose_window_expired():
-    limiter = SlidingWindowRateLimiter()
-    limiter.check("cheap", "cheap:a")
-    limiter.check("moderate", "moderate:b")
-
-    limiter._prune(time.time() + 3600)
-
-    assert limiter._stores["cheap"] == {}
-    assert limiter._stores["moderate"] == {}

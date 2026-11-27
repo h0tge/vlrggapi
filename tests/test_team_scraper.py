@@ -7,7 +7,33 @@ from api.scrapers.teams import (
     vlr_team_stats,
     vlr_team_transactions,
 )
-from api.scrapers.teams.parsers import _extract_prize_from_text
+from api.scrapers.teams.parsers import _extract_prize_from_text, _parse_single_roster_item
+from utils.cache_manager import cache_manager
+from utils.html_parsers import parse_html
+
+ROSTER_ITEM_HTML = """
+<div class="team-roster-item">
+  <a href="/player/1234/thuy">
+    <div class="team-roster-item-img"><img src="/img/player.png"></div>
+    <div class="team-roster-item-name">
+      <div class="team-roster-item-name-alias">Thuy</div>
+      <div class="team-roster-item-name-real">Ngoc-Thuy Duong</div>
+      Coach
+    </div>
+  </a>
+</div>
+"""
+
+
+def test_roster_role_survives_an_alias_embedded_in_the_real_name():
+    """Stripping every occurrence of the alias leaves fragments that look like a role."""
+    item = parse_html(ROSTER_ITEM_HTML).css_first(".team-roster-item")
+
+    player = _parse_single_roster_item(item, is_staff=True)
+
+    assert player["alias"] == "Thuy"
+    assert player["real_name"] == "Ngoc-Thuy Duong"
+    assert player["role"] == "Coach"
 
 
 class FakeResponse:
@@ -44,28 +70,6 @@ def test_extract_prize_from_text_handles_concatenated_years(text, expected):
 
 
 @pytest.mark.anyio
-async def test_vlr_team_stats_appends_date_start_to_url(monkeypatch):
-    body = (
-        '<html><body><table class="wf-table mod-team-maps"><tbody>'
-        '<tr><td>Haven (1)</td><td>100%</td><td>50%</td><td>1</td><td>0</td>'
-        '<td>0</td><td>0</td><td>0%</td><td>0</td><td>0</td><td>0%</td><td>0</td><td>0</td></tr>'
-        "</tbody></table></body></html>"
-    )
-    client = FakeAsyncClient(FakeResponse(200, body))
-
-    monkeypatch.setattr("api.scrapers.teams.crawlers.get_http_client", lambda: client)
-
-    await vlr_team_stats("77")
-    await vlr_team_stats("77", date_start="2026-05-03")
-
-    urls = [call[0] for call in client.calls]
-    assert urls == [
-        "https://www.vlr.gg/team/stats/77/",
-        "https://www.vlr.gg/team/stats/77/?date_start=2026-05-03",
-    ]
-
-
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("scraper", "args", "expected_status", "expected_detail"),
     [
@@ -96,3 +100,25 @@ async def test_team_scrapers_raise_http_errors_for_upstream_failures(
 
     assert exc_info.value.status_code == expected_status
     assert exc_info.value.detail == expected_detail
+
+
+@pytest.mark.anyio
+async def test_team_stats_sends_the_date_window_and_caches_per_window(monkeypatch):
+    cache_manager.clear_all()
+    stats_page = (
+        "<html><body><table class='wf-table mod-team-maps'><tbody></tbody></table>"
+        "<div class='team-summary-container'></div></body></html>"
+    )
+    client = FakeAsyncClient(FakeResponse(200, stats_page))
+
+    monkeypatch.setattr("api.scrapers.teams.crawlers.get_http_client", lambda: client)
+
+    await vlr_team_stats("77", "2026-01-01")
+    await vlr_team_stats("77", "2026-01-01")  # cached: no new fetch
+    await vlr_team_stats("77", "2026-02-01")  # different window: separate entry
+
+    urls = [url for url, _timeout in client.calls]
+    assert urls == [
+        "https://www.vlr.gg/team/stats/77/?date_start=2026-01-01",
+        "https://www.vlr.gg/team/stats/77/?date_start=2026-02-01",
+    ]

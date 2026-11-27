@@ -11,11 +11,9 @@ from .search import vlr_search
 from .stats import vlr_stats
 from .teams import (
     vlr_team,
-    vlr_team_history,
     vlr_team_matches,
     vlr_team_roster,
     vlr_team_schedule,
     vlr_team_stats,
     vlr_team_transactions,
-    vlr_team_upcoming,
 )

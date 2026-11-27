@@ -5,10 +5,11 @@ from urllib.parse import urlencode
 from fastapi import HTTPException
 
 from utils.cache_manager import cache_manager
-from utils.constants import CACHE_TTL_STATS, VLR_BASE_URL, VLR_STATS_URL
+from utils.constants import CACHE_TTL_STATS, STATS_TIERS, VLR_BASE_URL, VLR_STATS_URL
 from utils.error_handling import (
     handle_scraper_errors,
     raise_for_upstream_status,
+    validate_stats_map,
     validate_stats_region,
     validate_timespan,
 )
@@ -18,10 +19,11 @@ from utils.http_client import fetch_with_retries, get_http_client
 logger = logging.getLogger(__name__)
 
 # vlr.gg emits stable, semantic ``data-col`` attributes on every stats <th> except
-# the unlabelled player column. Read cells BY KEY (never by literal index) so a
-# future inserted column can never shift the mapping — the positional fragility
-# fixed here has broken this scraper three times (upstream issues #4 and #14, both
-# "vlr.gg added a column", each re-hardcoded to the new numbers).
+# the unlabelled player column. Read cells BY KEY so a future inserted column can
+# never shift the mapping — the positional fragility fixed here has broken this
+# scraper three times (upstream issues #4 and #14, both "vlr.gg added a column",
+# each re-hardcoded to the new numbers). Pages without ``data-col`` fall back to
+# ``_LEGACY_STATS_INDICES`` below, which does read fixed positions.
 # Keys are the CURRENT vlr.gg data-col vocabulary. The October 2026 /stats filter
 # revamp renamed two of them: the rating column went from ``rating2`` to
 # ``rating``, and first-kill rate from ``fbpr`` to ``fkpr``. It also added
@@ -192,44 +194,58 @@ async def _prime_session(client, *, force: bool = False) -> None:
 
 
 @handle_scraper_errors
-async def vlr_stats(region_key: str, timespan: str, event_id: str = "all"):
+async def vlr_stats(
+    region_key: str,
+    timespan: str,
+    event_id: str | None = None,
+    map_name: str = "all",
+    min_rounds: int = 200,
+    min_rating: float = 1.55,
+):
     # Normalize alias -> canonical BEFORE the cache key is formed so na and americas
     # resolve to one entry, and validate up front so bad input fails without a fetch.
     region_key = validate_stats_region(region_key)
     validate_timespan(timespan)
+    map_id = validate_stats_map(map_name)
+    min_rounds = max(0, int(min_rounds))
+    min_rating = max(0.0, float(min_rating))
 
     async def build():
-        if event_id and event_id != "all":
-            # The global /stats filter ignores event_id for some events (e.g. EWC
-            # 2026 returns "No players match these filters" for its page id while
-            # the event page has data). The event-scoped page always carries the
-            # stats; it is inherently all-time and region-scoped, matching what
-            # callers already request (region=all, timespan=all). No min rounds
-            # floor: the event page already scopes to event participants, so a
-            # player eliminated in groups (few rounds) should still appear.
+        resolved_event_id = event_id if event_id else "all"
+        # The revamped filter form submits the region and tier groups as checkbox
+        # arrays (``region[]`` / ``tier[]``). The legacy singular names are still
+        # accepted server-side, but the plural is what the site itself sends.
+        #
+        # The tier group is not optional: omit it and vlr.gg applies its own
+        # default of VCT alone (the form's ``data-defaults`` say tier=vct and only
+        # the vct box comes back checked), narrowing the ladder to VCT events.
+        #
+        # Built as an explicit pair list rather than ``urlencode(..., doseq=True)``
+        # so that only the two array-valued filters can repeat: doseq would also
+        # expand any single-valued filter that happened to hold a sequence.
+        filters = [
+            ("event_group_id", "all"),
+            ("event_id", resolved_event_id),
+            ("region[]", region_key),
+            *(("tier[]", tier) for tier in STATS_TIERS),
+            ("country", "all"),
+            ("min_rounds", min_rounds),
+            # vlr.gg expresses the rating floor on a x1000 integer scale.
+            ("min_rating", int(round(min_rating * 1000))),
+            ("agent", "all"),
+            ("map_id", map_id),
+            ("timespan", "all" if timespan.lower() == "all" else f"{timespan}d"),
+        ]
+        query = urlencode(filters)
+        url = f"{VLR_STATS_URL}/?{query}"
+        if event_id:
+            # The global filter ignores event_id for some events (2026-11-27: EWC 2026,
+            # 2952, gave 100 players from other events), so read the event's own page,
+            # with no floors so a player knocked out in groups still shows up.
             url = (
                 f"{VLR_BASE_URL}/event/stats/{event_id}"
-                f"?min_rounds=0&min_rating=0&agent=all&map_id=all"
+                f"?min_rounds=0&min_rating=0&agent=all&map_id={map_id}"
             )
-        else:
-            # The revamped filter form submits the region as a checkbox array
-            # (``region[]``); the legacy singular name is still accepted server-side,
-            # but the plural is what the site itself sends, so that is the shape we
-            # track. Values stay in the /stats vocabulary (see STATS_REGIONS).
-            query = urlencode(
-                {
-                    "event_group_id": "all",
-                    "event_id": "all",
-                    "region[]": region_key,
-                    "country": "all",
-                    "min_rounds": 200,
-                    "min_rating": 1550,
-                    "agent": "all",
-                    "map_id": "all",
-                    "timespan": "all" if timespan.lower() == "all" else f"{timespan}d",
-                }
-            )
-            url = f"{VLR_STATS_URL}/?{query}"
 
         client = get_http_client()
         await _prime_session(client)
@@ -288,5 +304,13 @@ async def vlr_stats(region_key: str, timespan: str, event_id: str = "all"):
         return {"data": {"status": status, "segments": result}}
 
     return await cache_manager.get_or_create_async(
-        CACHE_TTL_STATS, build, "stats", region_key, timespan, event_id
+        CACHE_TTL_STATS,
+        build,
+        "stats",
+        region_key,
+        timespan,
+        event_id or "all",
+        map_id,
+        min_rounds,
+        min_rating,
     )

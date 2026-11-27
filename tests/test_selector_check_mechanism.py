@@ -11,7 +11,7 @@ from dataclasses import replace
 
 import httpx
 import pytest
-from selectolax.parser import HTMLParser as SelectolaxParser
+from selectolax.lexbor import LexborHTMLParser as SelectolaxParser
 
 import tests.test_vlr_selectors as selector_module
 from tests.test_vlr_selectors import (
@@ -20,16 +20,16 @@ from tests.test_vlr_selectors import (
     PageData,
     _extract_match_ids,
     _extract_player_ids,
-    _label_witnesses,
-    _logs_are_published,
     _no_witness_reason,
     _no_witness_result,
     _probe_indices,
     _readiness_for,
+    _replay_is_published,
     _settled_witnesses,
     _stats_are_published,
     _unverifiable_skip_message,
     _vods_are_published,
+    _witness_url,
     grade_page,
     resolve_witnesses,
 )
@@ -313,43 +313,23 @@ def test_extract_player_ids_reads_player_links():
     assert _extract_player_ids(tree) == ["36245", "4774"]
 
 
-def test_label_witnesses_uses_discovered_ids():
-    ids = ["753450", "753449", "753459", "753460"]
+def test_witness_urls_derive_tab_from_label():
+    """Each match-backed label maps to the tab its page type grades."""
+    match_id = "753450"
 
-    detail = _label_witnesses("match_detail", ids)
-    assert detail == [
-        "https://www.vlr.gg/753450/",
-        "https://www.vlr.gg/753449/",
-        "https://www.vlr.gg/753459/",
-    ]
-
-    perf = _label_witnesses("match_detail_perf", ids)
-    assert perf == [
-        "https://www.vlr.gg/753450/?game=all&tab=performance",
-        "https://www.vlr.gg/753449/?game=all&tab=performance",
-    ]
-
-    econ = _label_witnesses("match_detail_econ", ids)
-    assert econ[0] == "https://www.vlr.gg/753450/?game=all&tab=economy"
-
-    logs = _label_witnesses("match_detail_logs", ids)
-    assert logs == [
-        "https://www.vlr.gg/753450/?game=all&tab=logs",
-        "https://www.vlr.gg/753449/?game=all&tab=logs",
-    ]
-
-
-def test_label_witnesses_has_no_static_fallback_when_discovery_is_empty():
-    """A hardcoded stand-in is what produced #183's false alarm every day.
-
-    ``/player/9`` still renders, but no longer renders the agent table (the data
-    window is empty for an inactive player), so grading a required selector
-    against it manufactures a "layout change" out of a quiet fixture. With no
-    discovered candidates the honest answer is "no witnesses", not a stale URL.
-    """
-    assert _label_witnesses("match_detail", []) == []
-    assert _label_witnesses("match_detail_perf", []) == []
-    assert _label_witnesses("match_detail_econ", []) == []
+    assert _witness_url("match_detail", match_id) == "https://www.vlr.gg/753450/"
+    assert (
+        _witness_url("match_detail_perf", match_id)
+        == "https://www.vlr.gg/753450/?game=all&tab=performance"
+    )
+    assert (
+        _witness_url("match_detail_econ", match_id)
+        == "https://www.vlr.gg/753450/?game=all&tab=economy"
+    )
+    assert (
+        _witness_url("match_detail_logs", match_id)
+        == "https://www.vlr.gg/753450/?game=all&tab=logs"
+    )
 
 
 def test_discovery_backed_page_types_declare_no_static_witness():
@@ -609,19 +589,6 @@ VODS_PUBLISHED = """
 </html>
 """
 
-LOGS_NOT_PUBLISHED = """
-<html>
-  <div class="lg-empty">No 2D replay available for this match</div>
-</html>
-"""
-
-LOGS_PUBLISHED = """
-<html>
-  <div class="lg-main mod-side"><div class="lg-body"></div></div>
-  <div class="lg-empty">Loading&hellip;</div>
-</html>
-"""
-
 
 class _FakeClient:
     """Serves canned HTML per URL and records the requests it served."""
@@ -652,6 +619,79 @@ def _clear_page_cache():
     selector_module._PAGE_CACHE.clear()
 
 
+REPLAY_UNAVAILABLE = """
+<html>
+  <div class="vm-stats-container">
+    <div class="vm-stats-game"><div class="lg-empty">No 2D replay available</div></div>
+    <div class="vm-stats-game mod-active"><div class="lg-empty">No 2D replay for this map</div></div>
+    <div class="vm-stats-game js-lg-lazy"><div class="lg-empty">Loading...</div></div>
+  </div>
+</html>
+"""
+
+REPLAY_AVAILABLE = """
+<html>
+  <div class="vm-stats-container">
+    <div class="vm-stats-game"><div class="lg-empty">No 2D replay available</div></div>
+    <div class="vm-stats-game mod-active">
+      <div class="lg-band"></div>
+      <div class="lg-round"><div class="lg-map" data-map="ascent"></div></div>
+    </div>
+    <div class="vm-stats-game js-lg-lazy"><div class="lg-empty">Loading...</div></div>
+  </div>
+</html>
+"""
+
+
+@pytest.mark.parametrize(
+    ("markup", "published"),
+    [
+        (REPLAY_UNAVAILABLE, False),
+        (REPLAY_AVAILABLE, True),
+        # replay markup next to a leftover placeholder: something to grade
+        (
+            REPLAY_AVAILABLE.replace(
+                '<div class="lg-band"></div>',
+                '<div class="lg-band"></div><div class="lg-empty">stale</div>',
+            ),
+            True,
+        ),
+        # a lazily loaded active block is graded, not skipped
+        (REPLAY_UNAVAILABLE.replace("mod-active", "mod-active js-lg-lazy"), True),
+        # no active block at all: unexpected shape, let the grader speak
+        ("<html><body><div>?</div></body></html>", True),
+    ],
+)
+def test_replay_readiness_skips_only_an_unavailable_active_block(markup, published):
+    assert _replay_is_published(SelectolaxParser(markup)) is published
+
+
+def test_logs_witnesses_are_readied_by_replay_not_by_stats():
+    """An unprocessed replay has published stats, so the stats predicate lies."""
+    assert _readiness_for("match_detail_logs") is _replay_is_published
+    assert _readiness_for("match_detail") is _vods_are_published
+    assert _readiness_for("match_detail_econ") is _stats_are_published
+    assert _stats_are_published(SelectolaxParser(REPLAY_UNAVAILABLE)) is True
+
+
+@pytest.mark.anyio
+async def test_settled_witnesses_skip_logs_tabs_without_a_replay():
+    ids = ["5000", "5001", "5002"]
+    pages = {}
+    for index, match_id in enumerate(ids):
+        body = REPLAY_UNAVAILABLE if index == 0 else REPLAY_AVAILABLE
+        pages[f"{VLR_BASE_URL}/{match_id}/?game=all&tab=logs"] = body
+    client = _FakeClient(pages)
+
+    picked = await _settled_witnesses(client, "match_detail_logs", ids)
+
+    assert picked == [
+        f"{VLR_BASE_URL}/5001/?game=all&tab=logs",
+        f"{VLR_BASE_URL}/5002/?game=all&tab=logs",
+    ]
+    assert f"{VLR_BASE_URL}/5000/?game=all&tab=logs" not in picked
+
+
 def test_stats_readiness_reads_only_the_active_game_block():
     assert _stats_are_published(SelectolaxParser(STATS_NOT_PUBLISHED)) is False
     assert _stats_are_published(SelectolaxParser(STATS_PUBLISHED)) is True
@@ -676,12 +716,6 @@ def test_vods_readiness_grades_a_match_with_no_watch_module():
     assert _vods_are_published(SelectolaxParser(MATCH_WITHOUT_WATCH)) is True
 
 
-def test_logs_readiness_sees_the_no_replay_empty_state():
-    """A published page still carries ``.lg-empty`` "Loading…" for idle maps."""
-    assert _logs_are_published(SelectolaxParser(LOGS_NOT_PUBLISHED)) is False
-    assert _logs_are_published(SelectolaxParser(LOGS_PUBLISHED)) is True
-
-
 def test_readiness_markers_are_not_the_selectors_under_test():
     """Readiness has to stay independent, or a real break would go blind.
 
@@ -690,7 +724,7 @@ def test_readiness_markers_are_not_the_selectors_under_test():
     check would skip instead of reporting that the VOD markup disappeared.
     """
     asserted = {sel for pc in PAGE_CHECKS for sel in (*pc.anchors, *pc.required)}
-    assert {".vm-stats-empty", ".sm-empty", ".lg-main"}.isdisjoint(asserted)
+    assert {".vm-stats-empty", ".sm-empty", ".lg-empty"}.isdisjoint(asserted)
 
 
 def test_probe_indices_always_starts_at_the_newest_page():
@@ -794,23 +828,6 @@ async def test_resolve_witnesses_only_returns_pages_that_have_the_data():
     assert resolved["match_detail_econ"] == [
         f"{VLR_BASE_URL}/3001/?game=all&tab=economy",
         f"{VLR_BASE_URL}/3002/?game=all&tab=economy",
-    ]
-
-
-@pytest.mark.anyio
-async def test_resolve_witnesses_skips_matches_without_a_replay():
-    """2026-10-29: logs fell through to the stats readiness, so match 777960
-    (no 2D replay) was graded and its viewer selectors were reported broken."""
-    ids = ["5000", "5001"]
-    listing = "".join(f'<a href="/{match_id}/slug">m</a>' for match_id in ids)
-    pages = {f"{VLR_BASE_URL}/matches/results": f"<html>{listing}</html>"}
-    for match_id, logs in zip(ids, (LOGS_NOT_PUBLISHED, LOGS_PUBLISHED), strict=True):
-        pages[f"{VLR_BASE_URL}/{match_id}/?game=all&tab=logs"] = logs
-
-    resolved = await resolve_witnesses(_FakeClient(pages))
-
-    assert resolved["match_detail_logs"] == [
-        f"{VLR_BASE_URL}/5001/?game=all&tab=logs"
     ]
 
 

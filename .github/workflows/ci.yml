@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [dev, master]
+    branches: [master]
   pull_request:
-    branches: [dev, master]
+    branches: [master]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
@@ -22,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        python-version: ["3.11", "3.12", "3.13", "3.14", "3.15"]
     # UV_PYTHON wins over .python-version, which would otherwise pin every
     # matrix job to the project's single pinned interpreter.
     env:
@@ -33,7 +33,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v10.3.0
+        uses: astral-sh/setup-uv@v10.3.3
         with:
           enable-cache: true
           python-version: ${{ matrix.python-version }}
@@ -61,15 +61,15 @@ jobs:
   publish:
     name: Publish Docker image
     needs: test
+    # Trunk-based: master is the only long-lived branch, so every push to it is
+    # a release and (re)tags :latest.
     if: >
       github.event_name == 'push' &&
-      (github.ref == 'refs/heads/dev' ||
-       github.ref == 'refs/heads/master')
+      github.ref == 'refs/heads/master'
     uses: ./.github/workflows/container.yml
     with:
       push: true
       image-tags: |
-        type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
         type=raw,value=latest,enable=${{ github.ref == 'refs/heads/master' }}
     secrets:
       GHCR_PAT: ${{ secrets.GHCR_PAT }}

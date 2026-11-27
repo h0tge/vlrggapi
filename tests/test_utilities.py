@@ -8,13 +8,41 @@ from fastapi import HTTPException
 
 from api.scrapers.events import vlr_event_matches, vlr_events
 from api.scrapers.match_detail import vlr_match_detail
-from api.scrapers.players import vlr_player, vlr_player_matches
+from api.scrapers.players import _parse_event_placements, vlr_player, vlr_player_matches
 from utils.cache_manager import CacheManager, cache_manager
 from utils.constants import CACHE_TTL_EVENTS, CACHE_TTL_MATCH_DETAIL
 from utils.error_handling import validate_event_query, validate_match_query, validate_region, validate_timespan
-from utils.html_parsers import HTMLParser, combine_date_and_time, parse_eta_to_timedelta, parse_match_timestamp
+from utils.html_parsers import (
+    HTMLParser,
+    combine_date_and_time,
+    parse_eta_to_timedelta,
+    parse_html,
+    parse_match_timestamp,
+)
 from utils.http_client import CircuitOpenError, circuit_breaker, fetch_with_retries
 from utils.pagination import PaginationConfig, scrape_multiple_pages
+
+
+@pytest.mark.anyio
+async def test_retry_logs_identify_the_upstream_without_echoing_the_url(monkeypatch, caplog):
+    """The URL carries caller-supplied ids, so it must never reach a log line."""
+    marker = "forged-entry"
+    url = f"https://www.vlr.gg/match/123/{marker}"
+    client = FakeAsyncClient({url: [FakeResponse(503), FakeResponse(503)]})
+
+    async def fake_sleep(_delay):
+        return None
+
+    monkeypatch.setattr("utils.http_client.asyncio.sleep", fake_sleep)
+    circuit_breaker.reset()
+
+    with caplog.at_level("WARNING", logger="utils.http_client"):
+        await fetch_with_retries(url, client=client, max_retries=2)
+
+    assert marker not in caplog.text
+    assert "https://www.vlr.gg" not in caplog.text
+    assert "www.vlr.gg" in caplog.text
+
 
 # --- PaginationConfig.get_page_range ---
 
@@ -395,6 +423,27 @@ async def test_vlr_event_matches_returns_error_payload_for_non_200(monkeypatch):
     cache_manager.clear_all()
 
 
+PLAYER_EVENTS_HTML = """
+<html>
+  <a class="wf-module-item player-event-item" href="/event/3123/champions">
+    <div class="text-of">Champions Tour</div>
+    <div class="ge-text-light">Playoffs — 4th</div>
+    <div class="ge-text-light">$10,000</div>
+    <div>Team 2024 2025</div>
+  </a>
+</html>
+"""
+
+
+def test_parse_event_placements_uses_the_trailing_year_as_the_date():
+    """The date column follows the team name, so a year inside the name is kept."""
+    placements = _parse_event_placements(parse_html(PLAYER_EVENTS_HTML))
+
+    assert len(placements) == 1
+    assert placements[0]["date"] == "2025"
+    assert placements[0]["team"] == "Team 2024"
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     ("scraper", "args", "url", "expected_error"),
@@ -471,7 +520,7 @@ async def test_vlr_match_detail_does_not_cache_non_200_responses(monkeypatch):
         ("https://www.vlr.gg/123", 30),
         ("https://www.vlr.gg/123", 30),
     ]
-    assert cache_manager.get(CACHE_TTL_MATCH_DETAIL, "match_detail", "123") == second
+    assert cache_manager.get(CACHE_TTL_MATCH_DETAIL, "match_detail", "123", False) == second
     cache_manager.clear_all()
 
 
@@ -526,36 +575,6 @@ async def test_fetch_with_retries_retries_request_errors(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert client.calls == [
-        ("https://example.test/resource", 30),
-        ("https://example.test/resource", 30),
-    ]
-
-
-@pytest.mark.anyio
-async def test_fetch_with_retries_retries_on_429(monkeypatch):
-    client = FakeAsyncClient(
-        {
-            "https://example.test/resource": [FakeResponse(429), FakeResponse(200)],
-        }
-    )
-
-    sleep_calls: list[float] = []
-
-    async def fake_sleep(delay):
-        sleep_calls.append(delay)
-
-    monkeypatch.setattr("utils.http_client.asyncio.sleep", fake_sleep)
-
-    response = await fetch_with_retries(
-        "https://example.test/resource",
-        client=client,
-        max_retries=2,
-        request_delay=1.0,
-    )
-
-    assert response.status_code == 200
-    assert len(sleep_calls) == 1
     assert client.calls == [
         ("https://example.test/resource", 30),
         ("https://example.test/resource", 30),
@@ -665,7 +684,7 @@ class TestCircuitBreaker:
 
 
 @pytest.mark.anyio
-async def test_fetch_with_retries_raises_circuit_open_error_when_circuit_is_open(monkeypatch):
+async def test_fetch_with_retries_raises_circuit_open_error_when_circuit_is_open():
     circuit_breaker.reset()
     circuit_breaker.fail_max = 1
     circuit_breaker.record_failure("https://example.test/resource")

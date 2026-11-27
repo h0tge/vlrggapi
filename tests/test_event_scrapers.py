@@ -9,7 +9,14 @@ import pytest
 from fastapi import HTTPException
 
 import api.scrapers.events as events_module
-from api.scrapers.event_detail import _parse_event_stages, _parse_prizes, _parse_standings, vlr_event_detail
+from api.scrapers.event_detail import (
+    _parse_event_stages,
+    _parse_event_teams,
+    _parse_prizes,
+    _parse_standings,
+    _qualifier_event_id,
+    vlr_event_detail,
+)
 from api.scrapers.events import _event_match_utc_offset, vlr_event_matches
 from utils.cache_manager import cache_manager
 from utils.html_parsers import parse_html
@@ -261,6 +268,37 @@ def test_parse_standings_names_each_group_of_a_multi_group_stage():
     ]
 
 
+STANDINGS_PTABLE_HTML = """
+<div class="wf-card">
+    <div class="wf-label mod-large">Swiss Stage</div>
+    <div class="wf-ptable" role="table">
+        <div class="row" role="row">
+            <div class="cell" role="cell">Team</div>
+            <div class="cell" role="cell">W</div>
+            <div class="cell" role="cell">L</div>
+        </div>
+        <div class="row" role="row">
+            <div class="cell" role="cell"><a href="/team/1/alpha">Alpha</a></div>
+            <div class="cell" role="cell">2</div>
+            <div class="cell" role="cell">0</div>
+        </div>
+    </div>
+</div>
+"""
+
+
+def test_parse_standings_ptable_entries_carry_an_empty_group():
+    """Both standings shapes expose `group` so consumers can index it safely."""
+    standings = _parse_standings(parse_html(STANDINGS_PTABLE_HTML))
+
+    assert standings == [{
+        "stage": "Swiss Stage",
+        "group": "",
+        "columns": ["Team", "W", "L"],
+        "rows": [{"Team": "Alpha", "W": "2", "L": "0"}],
+    }]
+
+
 # --- /event/{id}: prizes ---
 
 PRIZE_TABLE_HTML = """
@@ -373,3 +411,44 @@ async def test_vlr_event_detail_rejects_an_unknown_stage(monkeypatch):
     assert exc_info.value.status_code == 404
     assert "playoffs, group-stage" in exc_info.value.detail
     cache_manager.clear_all()
+
+
+EVENT_TEAMS_HTML = """
+<div class="wf-card event-team">
+  <a class="event-team-name" href="/team/100/team-one">Team One</a>
+  <div class="event-team-note">via <a href="/event/900/qualifier-cup">Qualifier Cup</a></div>
+</div>
+<div class="wf-card event-team">
+  <a class="event-team-name" href="/team/200/team-two">Team Two</a>
+  <div class="event-team-note">via <a href="https://www.vlr.gg/event/901/other-cup">Other Cup</a></div>
+</div>
+<div class="wf-card event-team">
+  <a class="event-team-name" href="/team/300/team-three">Team Three</a>
+  <div class="event-team-note">via <a href="https://example.test/event/999/x">Elsewhere</a></div>
+</div>
+"""
+
+
+def test_parse_event_teams_exposes_the_qualifier_event_id():
+    teams = _parse_event_teams(parse_html(EVENT_TEAMS_HTML))
+
+    assert teams[0]["qualification"] == "Qualifier Cup"
+    assert teams[0]["qualification_event_id"] == "900"
+    # an absolute vlr.gg URL is accepted
+    assert teams[1]["qualification_event_id"] == "901"
+    # a foreign host is refused even when the path looks like an event
+    assert teams[2]["qualification_event_id"] == ""
+
+
+@pytest.mark.parametrize(
+    ("href", "expected"),
+    [
+        ("", ""),
+        ("/team/123/slug", ""),
+        ("/event/abc/slug", ""),
+        ("https://vlr.gg/event/77/slug", "77"),
+        ("not a url", ""),
+    ],
+)
+def test_qualifier_event_id_only_accepts_vlr_event_paths(href, expected):
+    assert _qualifier_event_id(href) == expected

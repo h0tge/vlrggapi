@@ -3,7 +3,13 @@ import asyncio
 import pytest
 
 from api.scrapers.match_detail import vlr_match_detail
-from api.scrapers.match_detail.parsers import _parse_economy, _parse_streams_vods
+from api.scrapers.match_detail.parsers import (
+    _parse_economy,
+    _parse_map_players,
+    _parse_maps,
+    _parse_rounds,
+    _parse_streams_vods,
+)
 from utils.cache_manager import cache_manager
 from utils.html_parsers import parse_html
 
@@ -144,39 +150,6 @@ BASE_MATCH_HTML = f"""
       <div class="team"><div class="score">13</div><div class="mod-ct">7</div><div class="mod-t">6</div></div>
       <div class="team"><div class="score">11</div><div class="mod-ct">5</div><div class="mod-t">6</div></div>
     </div>
-    <div style="text-align: center; margin-top: 15px;">
-      <div style="overflow-x: auto; text-align: center;">
-        <div class="vlr-rounds">
-          <div class="vlr-rounds-row">
-            <div class="vlr-rounds-row-col">
-              <div style="height: 12px;"></div>
-              <div class="team"><img src="//owcdn.net/img/1.png">ONE</div>
-              <div class="team"><img src="//owcdn.net/img/2.png">TWO</div>
-            </div>
-            <div class="vlr-rounds-row-col" title="1-0">
-              <div class="rnd-num">1</div>
-              <div class="rnd-sq mod-win mod-ct"><img src="/img/vlr/game/round/elim.webp"></div>
-              <div class="rnd-sq"></div>
-            </div>
-            <div class="vlr-rounds-row-col" title="2-0">
-              <div class="rnd-num">2</div>
-              <div class="rnd-sq mod-win mod-ct"><img src="/img/vlr/game/round/defuse.webp"></div>
-              <div class="rnd-sq"></div>
-            </div>
-            <div class="vlr-rounds-row-col" title="2-1">
-              <div class="rnd-num">3</div>
-              <div class="rnd-sq"></div>
-              <div class="rnd-sq mod-win mod-t"><img src="/img/vlr/game/round/boom.webp"></div>
-            </div>
-            <div class="vlr-rounds-row-col" title="3-1">
-              <div class="rnd-num">4</div>
-              <div class="rnd-sq mod-win mod-t"><img src="/img/vlr/game/round/time.webp"></div>
-              <div class="rnd-sq"></div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
     <table class="wf-table-inset mod-overview"><tbody>{PLAYER_ROW}</tbody></table>
     <table class="wf-table-inset mod-overview"><tbody>{PLAYER_ROW}</tbody></table>
   </div>
@@ -192,6 +165,44 @@ BASE_MATCH_HTML = f"""
   </div>
 </html>
 """
+
+
+LIVE_PICKED_HTML = """
+<html>
+  <div class="vm-stats-game" data-game-id="g1">
+    <div class="vm-stats-game-header">
+      <div class="team"><div class="team-name">Alpha</div></div>
+      <div class="team"><div class="team-name">Bravo</div></div>
+      <div class="map">
+        <div class="map-name">
+          <span>Haven<span class="picked mod-2 ge-text-light">PICK</span></span>
+        </div>
+        <div class="map-duration">44:30</div>
+      </div>
+    </div>
+  </div>
+</html>
+"""
+
+
+def test_parse_maps_resolves_live_picked_badge_to_the_picking_team():
+    maps = _parse_maps(parse_html(LIVE_PICKED_HTML))
+
+    assert maps[0]["picked_by"] == "Bravo"
+    assert maps[0]["map_name"] == "Haven"
+
+
+def test_parse_maps_reads_legacy_picked_badge_team_name():
+    maps = _parse_maps(parse_html(BASE_MATCH_HTML))
+
+    assert [entry["picked_by"] for entry in maps] == ["Team One", "Team Two"]
+    assert [entry["map_name"] for entry in maps] == ["Ascent", "Bind"]
+
+
+def test_parse_maps_leaves_picked_by_empty_without_a_badge():
+    maps = _parse_maps(parse_html('<div class="vm-stats-game" data-game-id="g1"></div>'))
+
+    assert maps[0]["picked_by"] == ""
 
 
 def performance_html(opponent_name: str) -> str:
@@ -315,6 +326,25 @@ class FakeAsyncClient:
 
 
 @pytest.mark.anyio
+async def test_vlr_match_detail_light_skips_the_per_game_tabs(monkeypatch):
+    cache_manager.clear_all()
+    client = FakeAsyncClient({"https://www.vlr.gg/556": [FakeResponse(200, BASE_MATCH_HTML)]})
+
+    monkeypatch.setattr("api.scrapers.match_detail.crawler.get_http_client", lambda: client)
+
+    data = await vlr_match_detail("556", light=True)
+    segment = data["data"]["segments"][0]
+
+    assert [url for url, _timeout in client.calls] == ["https://www.vlr.gg/556"]
+    assert segment["economy"] == []
+    assert all(entry["rows"] == [] for entry in segment["economy_by_map"])
+    assert all(
+        entry["kill_matrix"] == [] and entry["advanced_stats"] == []
+        for entry in segment["performance"]["by_map"]
+    )
+
+
+@pytest.mark.anyio
 async def test_vlr_match_detail_fetches_performance_and_economy_for_all_games(monkeypatch):
     cache_manager.clear_all()
     client = FakeAsyncClient(
@@ -380,13 +410,6 @@ async def test_vlr_match_detail_fetches_performance_and_economy_for_all_games(mo
         "advanced_stats": [{"player": "TenZ", "2K": "3"}],
     }
     assert segment["maps"][1]["economy"] == [{"Team": "Team Two", "Pistol": "1/2", "Conv.": "2/2", "Bonus": "1/3"}]
-    assert segment["maps"][0]["rounds"] == [
-        {"round_num": 1, "winner": "team1", "side": "ct", "type": "elim"},
-        {"round_num": 2, "winner": "team1", "side": "ct", "type": "defuse"},
-        {"round_num": 3, "winner": "team2", "side": "t", "type": "boom"},
-        {"round_num": 4, "winner": "team1", "side": "t", "type": "time"},
-    ]
-    assert segment["maps"][1]["rounds"] == []
     assert len(client.calls) == 5
     cache_manager.clear_all()
 
@@ -437,28 +460,6 @@ async def test_vlr_match_detail_limits_tab_fetches_and_falls_back_on_tab_error(m
     assert tab_timeouts == [11] * 4
     assert segment["economy_by_map"][1] == {"game_id": "game-2", "rows": []}
     assert segment["maps"][1]["economy"] == []
-    cache_manager.clear_all()
-
-
-@pytest.mark.anyio
-async def test_vlr_match_detail_light_skips_tabs_but_keeps_lineups(monkeypatch):
-    cache_manager.clear_all()
-    client = FakeAsyncClient(
-        {
-            "https://www.vlr.gg/999": [FakeResponse(200, BASE_MATCH_HTML)],
-        }
-    )
-
-    monkeypatch.setattr("api.scrapers.match_detail.crawler.get_http_client", lambda: client)
-
-    data = await vlr_match_detail("999", light=True)
-    segment = data["data"]["segments"][0]
-
-    assert len(client.calls) == 1
-    assert segment["performance"]["kill_matrix"] == []
-    assert segment["performance"]["advanced_stats"] == []
-    assert segment["economy"] == []
-    assert segment["maps"][0]["players"]["team1"][0]["name"] == "TenZ"
     cache_manager.clear_all()
 
 
@@ -534,3 +535,145 @@ def test_parse_economy_keeps_legacy_table_fallback():
     rows = _parse_economy(parse_html(economy_legacy_html("Team One")))
 
     assert rows == [{"Team": "Team One", "Pistol": "50%"}]
+
+
+ROUNDS_HTML = """
+<div class="vm-stats-game">
+  <div class="vlr-rounds">
+    <div class="vlr-rounds-row">
+      <div class="vlr-rounds-row-col mod-teams"></div>
+      <div class="vlr-rounds-row-col">
+        <div class="rnd-sq mod-win mod-t"><img src="/img/vlr/game/round/elim.webp" alt=""></div>
+        <div class="rnd-sq"></div>
+      </div>
+      <div class="vlr-rounds-row-col">
+        <div class="rnd-sq"></div>
+        <div class="rnd-sq mod-win mod-ct"><img src="/img/vlr/game/round/defuse.webp" alt=""></div>
+      </div>
+      <div class="vlr-rounds-row-col">
+        <div class="rnd-sq"></div>
+        <div class="rnd-sq"></div>
+      </div>
+    </div>
+  </div>
+</div>
+"""
+
+
+def test_parse_rounds_skips_unplayed_slots_and_names_the_win_type():
+    game = parse_html(ROUNDS_HTML).css_first(".vm-stats-game")
+
+    rounds = _parse_rounds(game)
+
+    # the third column is an unplayed slot: no winner marker, no round icon
+    assert rounds == [
+        {"round_num": 1, "winner": "team1", "side": "t", "win_type": "elim"},
+        {"round_num": 2, "winner": "team2", "side": "ct", "win_type": "defuse"},
+    ]
+
+
+# --- ovw-cell player rows: the agent cell beside the player cell (issue #247)
+#
+# vlr.gg renders each player as a mod-player cell (name) followed by an
+# optional mod-agents cell and the stat cells. The agent icon used to be nested
+# inside the player cell, so both placements must keep working.
+
+
+def _ovw_cells(
+    name: str,
+    rating: str,
+    with_agent: bool = True,
+    agent_title: str | None = "Viper",
+    agent_src: str = "/img/vlr/game/agents/viper.png",
+) -> str:
+    """One player's ``.ovw-cell`` sequence: name, optional agent, then stats."""
+    parts = [
+        '<div class="ovw-cell mod-player"><div class="ovw-player">'
+        f'<div class="ovw-player-name text-of">{name}</div></div></div>'
+    ]
+    if with_agent:
+        attrs = ""
+        if agent_title is not None:
+            attrs = f' title="{agent_title}" alt="{agent_title.lower()}"'
+        parts.append(
+            '<div class="ovw-cell mod-agents"><div class="ovw-agents">'
+            f'<span class="stats-sq mod-agent small"><img src="{agent_src}"{attrs}></span>'
+            "</div></div>"
+        )
+    parts.append(
+        f'<div class="ovw-cell" data-col="rating2">'
+        f'<span class="side mod-both">{rating}</span></div>'
+    )
+    return "".join(parts)
+
+
+def _ovw_game(team1: list[str], team2: list[str]):
+    html = f'<div class="vm-stats-game">{"".join(team1 + team2)}</div>'
+    return parse_html(html).css_first(".vm-stats-game")
+
+
+def test_map_players_reads_the_agent_from_its_own_cell():
+    game = _ovw_game(
+        [_ovw_cells(f"P{i}", "1.00") for i in range(5)],
+        [_ovw_cells(f"Q{i}", "0.90") for i in range(5)],
+    )
+
+    players = _parse_map_players(game)
+
+    assert [p["agent"] for p in players["team1"]] == ["Viper"] * 5
+    assert [p["agent"] for p in players["team2"]] == ["Viper"] * 5
+    assert players["team2"][0]["rating"] == "0.90"
+
+
+def test_map_players_keeps_stats_aligned_when_a_player_has_no_agent_cell():
+    """A missing agent cell must not shift the following players' stats."""
+    team1 = [_ovw_cells("NoAgent", "1.11", with_agent=False)]
+    team1 += [_ovw_cells(f"P{i}", f"1.{i}0") for i in range(1, 5)]
+    team2 = [_ovw_cells(f"Q{i}", f"0.{i}0") for i in range(1, 6)]
+
+    players = _parse_map_players(_ovw_game(team1, team2))
+
+    assert players["team1"][0]["agent"] == ""
+    assert [p["rating"] for p in players["team1"]] == [
+        "1.11", "1.10", "1.20", "1.30", "1.40"
+    ]
+    assert [p["rating"] for p in players["team2"]] == [
+        "0.10", "0.20", "0.30", "0.40", "0.50"
+    ]
+
+
+def test_map_players_falls_back_to_the_agent_slug_when_title_and_alt_are_absent():
+    game = _ovw_game(
+        [_ovw_cells("P0", "1.00", agent_title=None)],
+        [_ovw_cells("Q0", "0.90", agent_title=None,
+                    agent_src="/img/vlr/game/agents/kayo.png")],
+    )
+
+    players = _parse_map_players(game)
+
+    assert players["team1"][0]["agent"] == "Viper"
+    assert players["team2"][0]["agent"] == "KAY/O"
+
+
+def test_map_players_still_reads_an_agent_nested_in_the_player_cell():
+    """The pre-#247 layout kept .ovw-agents inside the mod-player cell."""
+    nested = (
+        '<div class="vm-stats-game">'
+        '<div class="ovw-cell mod-player">'
+        '<div class="ovw-player-name text-of">TenZ</div>'
+        '<div class="ovw-agents"><span class="stats-sq mod-agent small">'
+        '<img src="/img/vlr/game/agents/jett.png" title="Jett"></span></div></div>'
+        '<div class="ovw-cell" data-col="rating2">'
+        '<span class="side mod-both">1.20</span></div>'
+        '<div class="ovw-cell mod-player">'
+        '<div class="ovw-player-name text-of">Second</div></div>'
+        '<div class="ovw-cell" data-col="rating2">'
+        '<span class="side mod-both">1.05</span></div>'
+        "</div>"
+    )
+
+    players = _parse_map_players(parse_html(nested).css_first(".vm-stats-game"))
+
+    assert players["team1"][0]["agent"] == "Jett"
+    assert players["team1"][0]["rating"] == "1.20"
+    assert players["team2"][0]["name"] == "Second"
