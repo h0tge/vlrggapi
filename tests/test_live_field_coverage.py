@@ -17,6 +17,9 @@ How it decides
   an unplayed match has no score, some listings have no event — so the check
   flags a *collapse* (#247 measured 0.0) rather than ordinary variance.
 
+  A map whose players all lack ACS has no published stats table, so its player
+  rows are not sampled at all (see ``has_published_stats``).
+
 Running it
   Contributor PRs never run the live part: ``pytest`` skips it unless
   ``FIELD_CHECK_LIVE=1``. The ``field-check`` workflow sets that and writes a
@@ -34,6 +37,7 @@ import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -48,6 +52,9 @@ REPORT_PATH = os.environ.get("FIELD_REPORT_PATH", "")
 # already yields 10 players x N maps, and every extra page is a request to
 # vlr.gg from a job that runs daily.
 MATCHES = 2
+# Settled matches tried to find MATCHES with published stats. One light
+# match-details call each.
+MAX_CANDIDATES = 8
 TEAMS = 2
 PLAYERS = 2
 
@@ -134,7 +141,11 @@ SPECS: tuple[EndpointSpec, ...] = (
             FieldRule(
                 "rating",
                 0.95,
-                "settled matches carry a rating per player; sampled only >= 24h old",
+                "published stats carry a rating per player; sampled only >= 24h "
+                "old, and maps with no ACS at all are skipped: China National "
+                "Tournament S7 Pro Qualifier showed rating and ACS blank at 1d, "
+                "4d and 1w3d (793776, 793782, 793770, 788021, 2026-11-27, h0tge "
+                "#3). Blind spot: ACS breaking on only some maps hides those maps",
             ),
             FieldRule("name", 1.0, "the player cell always carries the alias"),
         ),
@@ -355,6 +366,59 @@ def select_settled(
     return settled
 
 
+def has_published_stats(players: list[dict]) -> bool:
+    """False when vlr.gg shows the scoreboard with no stats table behind it.
+
+    Keyed on ACS, never on rating: a lost rating column must still fail.
+    """
+    return any(has_value(player.get("acs")) for player in players)
+
+
+async def _collect_details(
+    client, match_ids: list[str], collected: dict[str, list[dict]]
+) -> tuple[list[str], int]:
+    """Sample matches until ``MATCHES`` of them had published player stats.
+
+    Returns the team ids seen and how many maps had no published stats.
+    """
+    team_ids: list[str] = []
+    skipped = sampled = 0
+    for match_id in match_ids:
+        if sampled == MATCHES:
+            break
+        get_rate_limiter()._stores.clear()
+        # light: nothing here reads the performance/economy tabs.
+        response = await client.get(f"/v2/match/{match_id}/details?light=true")
+        detail = _first_segment(response.json())
+        published = False
+        for team in detail.get("teams") or []:
+            if team.get("id") and team["id"] not in team_ids:
+                team_ids.append(str(team["id"]))
+        for map_entry in detail.get("maps") or []:
+            collected["match details maps"].append(
+                {
+                    "map_name": map_entry.get("map_name"),
+                    "score": map_entry.get("score"),
+                }
+            )
+            sides = map_entry.get("players") or {}
+            players = [*(sides.get("team1") or []), *(sides.get("team2") or [])]
+            if not has_published_stats(players):
+                skipped += 1
+                continue
+            published = True
+            collected["match details players"].extend(
+                {
+                    "name": player.get("name"),
+                    "agent": player.get("agent"),
+                    "rating": player.get("rating"),
+                }
+                for player in players
+            )
+        sampled += published
+    return team_ids, skipped
+
+
 async def _collect_live() -> dict[str, list[dict]]:
     """Sample the live API and return ``{endpoint label: records}``."""
     collected: dict[str, list[dict]] = {spec.label: [] for spec in SPECS}
@@ -367,34 +431,11 @@ async def _collect_live() -> dict[str, list[dict]]:
         results = [r for r in _segments(results_payload) if isinstance(r, dict)]
         collected["match results"] = results
 
-        match_ids = select_settled(results)
-        team_ids: list[str] = []
+        team_ids, skipped = await _collect_details(
+            client, select_settled(results, limit=MAX_CANDIDATES), collected
+        )
+        print(f"\nmaps skipped (no published stats): {skipped}")
         player_ids: list[str] = []
-
-        for match_id in match_ids:
-            get_rate_limiter()._stores.clear()
-            detail = _first_segment(
-                (await client.get(f"/v2/match/{match_id}/details")).json()
-            )
-            for team in detail.get("teams") or []:
-                if team.get("id") and team["id"] not in team_ids:
-                    team_ids.append(str(team["id"]))
-            for map_entry in detail.get("maps") or []:
-                collected["match details maps"].append(
-                    {
-                        "map_name": map_entry.get("map_name"),
-                        "score": map_entry.get("score"),
-                    }
-                )
-                for side in ("team1", "team2"):
-                    for player in (map_entry.get("players") or {}).get(side) or []:
-                        collected["match details players"].append(
-                            {
-                                "name": player.get("name"),
-                                "agent": player.get("agent"),
-                                "rating": player.get("rating"),
-                            }
-                        )
 
         for team_id in team_ids[:TEAMS]:
             get_rate_limiter()._stores.clear()
@@ -509,3 +550,60 @@ def test_select_settled_is_empty_when_every_match_is_fresh():
     assert select_settled(results) == []
     for spec in SPECS:
         assert not coverage([], spec)[0].ok
+
+
+# Player rows as parsed from vlr.gg on 2026-11-27. 793776 is China National
+# Tournament, which publishes the scoreboard's KDA but no rating or ACS.
+UNPUBLISHED_PLAYER = {"name": "Ninebody", "agent": "Waylay", "rating": "", "acs": ""}
+PUBLISHED_PLAYER = {"name": "Deadly10", "agent": "Chamber", "rating": "1.33", "acs": "252"}
+
+
+class _FakeDetails:
+    """Stands in for the API client: one single-map match per id."""
+
+    def __init__(self, players_by_id: dict[str, dict]):
+        self.players_by_id = players_by_id
+        self.fetched: list[str] = []
+
+    async def get(self, url: str):
+        match_id = url.split("/")[3]
+        self.fetched.append(match_id)
+        player = self.players_by_id[match_id]
+        detail = {
+            "maps": [
+                {"map_name": "Lotus", "score": {}, "players": {"team1": [player]}}
+            ]
+        }
+        return SimpleNamespace(json=lambda: {"data": {"segments": [detail]}})
+
+
+def test_unpublished_maps_are_skipped_and_do_not_use_up_the_sample():
+    client = _FakeDetails(
+        {
+            "1": UNPUBLISHED_PLAYER,
+            "2": UNPUBLISHED_PLAYER,
+            "3": PUBLISHED_PLAYER,
+            "4": PUBLISHED_PLAYER,
+            "5": PUBLISHED_PLAYER,
+        }
+    )
+    collected = {spec.label: [] for spec in SPECS}
+
+    _, skipped = asyncio.run(_collect_details(client, list("12345"), collected))
+
+    assert client.fetched == ["1", "2", "3", "4"]
+    assert skipped == 2
+    players = coverage(collected["match details players"], SPEC_BY_LABEL["match details players"])
+    assert [item.total for item in players] == [2, 2, 2]
+    assert failures(players) == []
+
+
+def test_lost_rating_column_still_fails_on_a_published_map():
+    """ACS present means vlr.gg published the table, so a blank rating is ours."""
+    client = _FakeDetails({"1": {**PUBLISHED_PLAYER, "rating": ""}})
+    collected = {spec.label: [] for spec in SPECS}
+
+    asyncio.run(_collect_details(client, ["1"], collected))
+
+    players = coverage(collected["match details players"], SPEC_BY_LABEL["match details players"])
+    assert [item.field for item in failures(players)] == ["rating"]
