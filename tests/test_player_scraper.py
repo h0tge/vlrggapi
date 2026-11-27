@@ -1,4 +1,4 @@
-"""Player profile parsers against vlr.gg pages recorded on 2026-11-19 (aspas 8480, TenZ 9)."""
+"""Player profile parsers against vlr.gg pages recorded on 2026-11-19 (aspas 8480, TenZ 9) and 2026-11-25 (pndomnia 2363)."""
 from pathlib import Path
 
 import pytest
@@ -75,3 +75,11 @@ def test_period_skips_the_role_row_of_a_staff_card():
     assert current["period"] == ""
     assert past[0]["team_name"] == "FULL SENSE SISU"
     assert past[0]["period"] == "joined in August 2026"
+
+
+def test_a_card_under_past_teams_is_never_current_even_without_a_dash():
+    """«left in November 2020» has no dash; with no «Current Teams» heading the player has no current team."""
+    page = parse_html((FIXTURES / "player_2363_pndomnia.html").read_text(encoding="utf-8"))
+    current, past = _parse_teams(page)
+    assert current["team_name"] == ""
+    assert [(t["team_name"], t["period"]) for t in past] == [("Paper Rex", "left in November 2020")]

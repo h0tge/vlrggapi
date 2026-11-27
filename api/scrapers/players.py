@@ -97,8 +97,9 @@ def _parse_teams(html: HTMLParser) -> tuple[dict, list[dict]]:
     - Status tag in `.wf-tag.mod-light` (e.g. "stand-in")
     - Dates in the last `.ge-text-light` element (e.g. "March 2021 — September 2024")
     - Logo as an `img` element
-    - The first item is typically the current team; if it has date text with
-      a "—" separator showing an end date, it's actually a past team.
+
+    Cards sit under «Current Teams» / «Past Teams» headings, which decide the split. There is one
+    ``current_team`` slot: further current cards are listed in ``past_teams``.
     """
     current_team: dict = {
         "name": "", "tag": "", "logo": "", "joined": "", "team_name": "", "period": "",
@@ -109,7 +110,18 @@ def _parse_teams(html: HTMLParser) -> tuple[dict, list[dict]]:
     if not container:
         return current_team, past_teams
 
-    for item in container.css(".wf-module-item"):
+    cards: list = []
+    for heading in container.css("h2.wf-label"):
+        label = heading.text(strip=True)
+        if label not in ("Current Teams", "Past Teams"):
+            continue
+        card = heading.next
+        while card is not None and card.tag != "div":
+            card = card.next
+        if card is not None:
+            cards += [(label, item) for item in card.css(".wf-module-item")]
+
+    for label, item in cards:
         # Logo
         logo = ""
         logo_elem = item.css_first("img")
@@ -155,12 +167,7 @@ def _parse_teams(html: HTMLParser) -> tuple[dict, list[dict]]:
         if not name:
             continue
 
-        # Determine if current or past: if dates contain "—" with text after it,
-        # that indicates an end date (= past team)
-        has_end_date = "\u2013" in dates or "\u2014" in dates or " – " in dates or " - " in dates
-        is_current = not has_end_date
-
-        if is_current and not current_team["name"]:
+        if label == "Current Teams" and not current_team["name"]:
             joined = dates  # e.g. "joined in May 2025"
             current_team = {
                 "name": name, "tag": status, "logo": logo, "joined": joined,
