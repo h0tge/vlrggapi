@@ -100,7 +100,9 @@ def _parse_teams(html: HTMLParser) -> tuple[dict, list[dict]]:
     - The first item is typically the current team; if it has date text with
       a "—" separator showing an end date, it's actually a past team.
     """
-    current_team: dict = {"name": "", "tag": "", "logo": "", "joined": ""}
+    current_team: dict = {
+        "name": "", "tag": "", "logo": "", "joined": "", "team_name": "", "period": "",
+    }
     past_teams: list[dict] = []
 
     container = html.css_first(".player-summary-container-1")
@@ -127,6 +129,20 @@ def _parse_teams(html: HTMLParser) -> tuple[dict, list[dict]]:
                 dates = dt
                 break
 
+        # Rows by structure: name div, role tag row, period, then the italic «Inactive from …».
+        rows = item.css("div > div")
+        team_name = next((t for t in (r.text(strip=True) for r in rows) if t), "")
+        period = next(
+            (
+                r.text(strip=True)
+                for r in rows
+                if "ge-text-light" in (r.attributes.get("class") or "")
+                and r.css_first(".wf-tag") is None
+                and r.text(strip=True)
+            ),
+            "",
+        )
+
         # Team name: full text minus dates and status
         full_text = item.text(strip=True)
         name = full_text
@@ -146,11 +162,15 @@ def _parse_teams(html: HTMLParser) -> tuple[dict, list[dict]]:
 
         if is_current and not current_team["name"]:
             joined = dates  # e.g. "joined in May 2025"
-            current_team = {"name": name, "tag": status, "logo": logo, "joined": joined}
+            current_team = {
+                "name": name, "tag": status, "logo": logo, "joined": joined,
+                "team_name": team_name, "period": period,
+            }
         else:
-            past_teams.append(
-                {"name": name, "tag": status, "dates": dates, "logo": logo}
-            )
+            past_teams.append({
+                "name": name, "tag": status, "dates": dates, "logo": logo,
+                "team_name": team_name, "period": period,
+            })
 
     return current_team, past_teams
 
@@ -233,6 +253,26 @@ def _parse_agent_stats(html: HTMLParser) -> list[dict]:
     return agent_stats
 
 
+def _parse_first_stage(item) -> dict:
+    """The first series row by structure: «Playoffs – 5th–6th», optional bold prize, then the team."""
+    label = item.css_first("span.ge-text-light")
+    row = label.parent if label else None
+    if row is None:
+        return {"stage_place": [], "stage_prize": "", "stage_team": ""}
+    label_text = label.text(strip=True)
+    prize_elem = row.css_first("span:not(.ge-text-light)")
+    prize = prize_elem.text(strip=True) if prize_elem else ""
+    team = row.text(strip=True).replace(label_text, "", 1)
+    if prize:
+        team = team.replace(prize, "", 1)
+    places = [int(n) for n in re.findall(r"(\d+)(?:st|nd|rd|th)", label_text)]
+    return {
+        "stage_place": [places[0], places[-1]] if places else [],
+        "stage_prize": prize,
+        "stage_team": team.strip(),
+    }
+
+
 def _parse_event_placements(html: HTMLParser) -> list[dict]:
     """
     Extract tournament placement records.
@@ -291,6 +331,8 @@ def _parse_event_placements(html: HTMLParser) -> list[dict]:
             last_year = year_matches[-1]
             team = (remaining[: last_year.start()] + remaining[last_year.end():]).strip()
 
+        stage = _parse_first_stage(item)
+
         href = item.attributes.get("href", "")
         url = build_full_url(href)
 
@@ -303,6 +345,7 @@ def _parse_event_placements(html: HTMLParser) -> list[dict]:
                 "team": team,
                 "date": date,
                 "url": url,
+                **stage,
             })
 
     return placements
